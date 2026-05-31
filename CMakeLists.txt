@@ -63,18 +63,21 @@ if(NOT DEFINED BREW_PREFIX)
 endif()
 message(STATUS "Library prefix: ${BREW_PREFIX}")
 
-# Google Test
-find_package(GTest QUIET)
-if(NOT GTest_FOUND)
-    list(APPEND CMAKE_PREFIX_PATH "${BREW_PREFIX}")
-    find_package(GTest REQUIRED)
-endif()
-# Ensure gtest headers are findable (Homebrew may not symlink to /usr/local/include).
-if(APPLE)
-    execute_process(COMMAND brew --prefix googletest
-        OUTPUT_VARIABLE _gtest_prefix OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    if(_gtest_prefix AND EXISTS "${_gtest_prefix}/include")
-        include_directories("${_gtest_prefix}/include")
+# Google Test (only required when building tests)
+option(AMIND_BUILD_TESTS "Build unit tests" ON)
+if(AMIND_BUILD_TESTS)
+    find_package(GTest QUIET)
+    if(NOT GTest_FOUND)
+        list(APPEND CMAKE_PREFIX_PATH "${BREW_PREFIX}")
+        find_package(GTest REQUIRED)
+    endif()
+    # Ensure gtest headers are findable (Homebrew may not symlink to /usr/local/include).
+    if(APPLE)
+        execute_process(COMMAND brew --prefix googletest
+            OUTPUT_VARIABLE _gtest_prefix OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(_gtest_prefix AND EXISTS "${_gtest_prefix}/include")
+            include_directories("${_gtest_prefix}/include")
+        endif()
     endif()
 endif()
 
@@ -153,7 +156,6 @@ if(AMIND_ENABLE_TLS)
 endif()
 
 # ── Tests ───────────────────────────────────────────────────────────────────
-option(AMIND_BUILD_TESTS "Build unit tests" ON)
 if(AMIND_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)

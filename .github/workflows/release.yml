@@ -21,10 +21,10 @@ jobs:
         include:
           - os: ubuntu-22.04
             target: linux-amd64
-            cmake_extra: "-DCMAKE_EXE_LINKER_FLAGS=-static-libgcc\ -static-libstdc++"
+            cmake_extra: ""
           - os: ubuntu-22.04
             target: linux-arm64
-            cmake_extra: "-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64.cmake -DCMAKE_EXE_LINKER_FLAGS=-static-libgcc\ -static-libstdc++"
+            cmake_extra: "-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64.cmake"
           - os: macos-14
             target: darwin-arm64
             cmake_extra: ""
@@ -91,11 +91,16 @@ jobs:
       # ── Configure & Build ────────────────────────────────────────────────
       - name: Configure
         run: |
+          EXTRA_FLAGS=""
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            EXTRA_FLAGS="-DCMAKE_EXE_LINKER_FLAGS=-static-libgcc;-static-libstdc++"
+          fi
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DAMIND_BUILD_TESTS=OFF \
             -DAMIND_BUILD_BENCHMARKS=OFF \
             -DAMIND_ENABLE_TLS=ON \
+            $EXTRA_FLAGS \
             ${{ matrix.cmake_extra }}
 
       - name: Build

@@ -91,16 +91,15 @@ jobs:
       # ── Configure & Build ────────────────────────────────────────────────
       - name: Configure
         run: |
-          EXTRA_FLAGS=""
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            EXTRA_FLAGS="-DCMAKE_EXE_LINKER_FLAGS=-static-libgcc;-static-libstdc++"
+            export LDFLAGS="-static-libgcc -static-libstdc++"
           fi
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DAMIND_BUILD_TESTS=OFF \
             -DAMIND_BUILD_BENCHMARKS=OFF \
             -DAMIND_ENABLE_TLS=ON \
-            $EXTRA_FLAGS \
+            ${LDFLAGS:+-DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS"} \
             ${{ matrix.cmake_extra }}
 
       - name: Build

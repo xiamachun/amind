@@ -51,7 +51,39 @@ Amind gives AI Agents a persistent, version-tracked memory system with metacogni
 └──────────────────────────────────────────────────────────┘
 ```
 
-## Quick Start
+## Quick Start: Download Pre-built Binary
+
+No compilation needed — download and run:
+
+```bash
+# Linux x86_64
+curl -LO https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-linux-amd64.tar.gz
+tar xzf amind-v0.1.0-linux-amd64.tar.gz && cd amind-v0.1.0-linux-amd64
+
+# Initialize config
+cp amind.conf.example amind.conf
+vim amind.conf  # Fill in your LLM API Key and Embedding config
+
+# Start
+./amind.sh start
+./amind.sh status    # Check running status
+```
+
+<details>
+<summary>Other platforms</summary>
+
+| Platform | Download | Use Case |
+|----------|----------|----------|
+| **Linux x86_64** | [amind-v0.1.0-linux-amd64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-linux-amd64.tar.gz) | Cloud servers, VPS, Docker |
+| **Linux ARM64** | [amind-v0.1.0-linux-arm64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-linux-arm64.tar.gz) | AWS Graviton, Raspberry Pi, Oracle ARM |
+| **macOS Apple Silicon** | [amind-v0.1.0-darwin-arm64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-darwin-arm64.tar.gz) | M1/M2/M3/M4 Mac |
+| **macOS Intel** | [amind-v0.1.0-darwin-amd64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-darwin-amd64.tar.gz) | Pre-2020 Mac |
+
+> **System requirements:** Linux requires glibc 2.35+ (Ubuntu 22.04+ / Debian 12+ / Fedora 36+ / RHEL 9+), macOS 12+.
+
+</details>
+
+## Build from Source
 
 ### Prerequisites
 

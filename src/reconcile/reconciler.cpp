@@ -1,0 +1,299 @@
+#include "reconciler.h"
+
+#include <algorithm>
+#include <chrono>
+#include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
+#include <sstream>
+
+namespace amind {
+
+const char* reconcileOpToString(ReconcileOp op) {
+    switch (op) {
+        case ReconcileOp::ADD:       return "ADD";
+        case ReconcileOp::REPLACE:   return "REPLACE";
+        case ReconcileOp::RETRACT:   return "RETRACT";
+        case ReconcileOp::REINFORCE: return "REINFORCE";
+        case ReconcileOp::NOOP:      return "NOOP";
+    }
+    return "ADD";
+}
+
+ReconcileOp parseReconcileOp(const std::string& s) {
+    if (s == "REPLACE")   return ReconcileOp::REPLACE;
+    if (s == "RETRACT")   return ReconcileOp::RETRACT;
+    if (s == "REINFORCE") return ReconcileOp::REINFORCE;
+    if (s == "NOOP")      return ReconcileOp::NOOP;
+    return ReconcileOp::ADD;
+}
+
+namespace {
+
+// The system instruction is bilingual on purpose: amind clients write in many
+// languages (we've already seen Chinese/English mixed). The instruction
+// itself stays in English so it doesn't compete with content tokens.
+const char* SYSTEM_PROMPT = R"(You are a fact-reconciliation engine for a memory store.
+
+The store contains user-specific facts. When a NEW fact arrives, you decide
+whether it conflicts with EXISTING facts and pick ONE operation:
+
+  ADD        — new fact is independent; no existing fact addresses the same property
+  REPLACE    — same property of the same entity, but a NEW value
+               → retire the old fact, keep the new one
+  RETRACT    — new fact negates ("不" / "no longer" / "stop") an existing fact
+               → retire the old fact, do NOT store the new statement
+  REINFORCE  — new fact says the SAME thing in different words
+               → do NOT store new (duplicate), bump importance of the existing
+  NOOP       — new fact is fully covered already; skip silently
+
+CRITICAL RULES — apply these first:
+  1. If existing says "X的Y是A" and new says "X的Y是B" with the SAME X and Y,
+     pick REPLACE. Examples:
+       existing "用户家的狗叫旺财"   new "用户家的狗叫小白"     → REPLACE
+       existing "用户喜欢迪丽热巴"   new "用户喜欢古力娜扎"      → REPLACE
+       existing "猫3岁"            new "猫5岁"                → REPLACE
+  2. PREFERENCE properties — "favorite/most-liked/best X" is ONE property per
+     person. A new favorite/preference value REPLACES the old one even when
+     the specific values look unrelated. Examples:
+       existing "用户最喜欢的餐厅是海底捞"  new "用户喜欢大董烤鸭,几乎每周都去" → REPLACE
+       existing "用户喜欢喝可乐"           new "用户最爱喝果汁"               → REPLACE
+       existing "用户最爱的电影是星战"       new "用户最爱的电影是头号玩家"      → REPLACE
+     The brand/cuisine looking "different" is the WHOLE POINT of a preference
+     update — that's a value change on the same preference slot.
+  3. BINDING/ASSOCIATION facts about an OLD value should be RETRACT when the
+     anchor value gets superseded. Examples:
+       existing "用户的银行卡绑定138号码"  new "用户的138号码已注销"  → RETRACT
+       existing "用户用138注册微信"        new "用户的138号码已注销"  → RETRACT
+  4. If new contains a negation about an existing claim, pick RETRACT.
+     Examples:
+       existing "用户用 IntelliJ"    new "用户不再用 IntelliJ"  → RETRACT
+  5. Same statement worded differently → REINFORCE.
+  6. Don't choose ADD just because the surface form differs; check the
+     underlying claim. Default to ADD only when there is genuinely no overlap.
+
+Output STRICT JSON, nothing else, no markdown fences:
+  {"op":"<OP>","target_id":<integer or 0>,"rationale":"<one short Chinese or English sentence>"}
+
+target_id is the integer id of the existing fact you act on.
+For ADD, target_id MUST be 0.
+For non-ADD, target_id MUST be one of the listed existing fact ids.)";
+
+std::string truncate(const std::string& s, size_t max_chars) {
+    if (s.size() <= max_chars) return s;
+    // Make sure we don't cut a UTF-8 byte sequence in half: walk back to a
+    // byte that doesn't have the 10xxxxxx continuation bit pattern.
+    size_t cut = max_chars;
+    while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) {
+        cut--;
+    }
+    return s.substr(0, cut) + "…";
+}
+
+}  // namespace
+
+Reconciler::Reconciler(std::shared_ptr<LLMProvider> llm, Config config)
+    : llm_(std::move(llm)), config_(config) {}
+
+std::string Reconciler::buildPrompt(
+    const std::string& candidate,
+    const std::vector<std::pair<MemoryRecord, float>>& neighbours,
+    size_t max_content_chars) {
+
+    std::ostringstream oss;
+    oss << "Existing facts about this user:\n";
+    if (neighbours.empty()) {
+        oss << "  (none)\n";
+    } else {
+        for (const auto& [rec, sim] : neighbours) {
+            oss << "  - id=" << rec.memory_id
+                << " sim=" << std::to_string(sim).substr(0, 4)
+                << " content=\"" << truncate(rec.content, max_content_chars) << "\"\n";
+        }
+    }
+    oss << "\nNew fact (just extracted from latest conversation):\n";
+    oss << "  \"" << truncate(candidate, max_content_chars) << "\"\n";
+    oss << "\nDecide the op as instructed and respond with the JSON object only.";
+    return oss.str();
+}
+
+ReconcileDecision Reconciler::parseResponse(const std::string& json_str) {
+    ReconcileDecision out;
+    try {
+        // Tolerant parsing: strip ```json fences and stray prose around JSON.
+        auto first_brace = json_str.find('{');
+        auto last_brace = json_str.rfind('}');
+        if (first_brace == std::string::npos || last_brace == std::string::npos
+            || last_brace < first_brace) {
+            spdlog::warn("Reconciler: no JSON object found in LLM response, defaulting to ADD");
+            return out;
+        }
+        std::string trimmed = json_str.substr(first_brace, last_brace - first_brace + 1);
+        auto j = nlohmann::json::parse(trimmed);
+        out.op = parseReconcileOp(j.value("op", "ADD"));
+        // target_id may come as int or string; tolerate both.
+        if (j.contains("target_id")) {
+            const auto& t = j["target_id"];
+            if (t.is_number_integer())       out.target_id = t.get<uint64_t>();
+            else if (t.is_string()) {
+                try { out.target_id = std::stoull(t.get<std::string>()); } catch (...) {}
+            }
+        }
+        out.rationale = j.value("rationale", "");
+        // Sanity: ADD must have target_id=0; non-ADD must have target_id != 0.
+        if (out.op == ReconcileOp::ADD && out.target_id != 0) {
+            spdlog::debug("Reconciler: ADD with non-zero target_id, normalising to 0");
+            out.target_id = 0;
+        } else if (out.op != ReconcileOp::ADD && out.target_id == 0) {
+            spdlog::warn("Reconciler: {} with target_id=0 — degrading to ADD",
+                         reconcileOpToString(out.op));
+            out.op = ReconcileOp::ADD;
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Reconciler: response parse failed ({}); defaulting to ADD: {}",
+                     e.what(), json_str.substr(0, 200));
+    }
+    return out;
+}
+
+ReconcileDecision Reconciler::decide(
+    const std::string& candidate_content,
+    const std::vector<std::pair<MemoryRecord, float>>& neighbours) {
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    {
+        std::lock_guard lock(stats_mu_);
+        stats_.total_calls++;
+    }
+
+    // Filter to neighbours above the similarity floor; preserve order.
+    std::vector<std::pair<MemoryRecord, float>> strong;
+    strong.reserve(std::min(neighbours.size(), config_.max_neighbours));
+    for (const auto& nb : neighbours) {
+        if (nb.second < config_.similarity_floor) continue;
+        strong.push_back(nb);
+        if (strong.size() >= config_.max_neighbours) break;
+    }
+
+    if (strong.empty() || !llm_) {
+        // No strong neighbours → fact stands on its own.
+        std::lock_guard lock(stats_mu_);
+        stats_.op_add++;
+        return ReconcileDecision{
+            .op = ReconcileOp::ADD, .target_id = 0,
+            .rationale = "no strong neighbours", .from_fallback = false,
+        };
+    }
+
+    std::string user_prompt = buildPrompt(candidate_content, strong, config_.max_content_chars);
+    std::string sys_prompt = SYSTEM_PROMPT;
+
+    {
+        std::lock_guard lock(stats_mu_);
+        stats_.llm_invocations++;
+    }
+
+    auto resp = llm_->generateJson(user_prompt, sys_prompt);
+    if (!resp.ok()) {
+        spdlog::warn("Reconciler: LLM call failed ({}); defaulting to ADD",
+                     resp.error().toString());
+        std::lock_guard lock(stats_mu_);
+        stats_.llm_failures++;
+        stats_.op_add++;
+        return ReconcileDecision{
+            .op = ReconcileOp::ADD, .target_id = 0,
+            .rationale = "LLM failure: " + resp.error().toString(),
+            .from_fallback = true,
+        };
+    }
+
+    ReconcileDecision decision = parseResponse(*resp);
+
+    // Diagnostic: log what we asked + what we got. Helps tune the prompt and
+    // similarity floor when REPLACE/RETRACT aren't firing despite obvious
+    // overlap.  Trimmed to keep log lines bounded.
+    spdlog::info("Reconciler decision: op={} target_id={} rationale={}",
+                 reconcileOpToString(decision.op), decision.target_id,
+                 decision.rationale.substr(0, 120));
+    spdlog::info("Reconciler candidate: {}", candidate_content.substr(0, 120));
+    for (const auto& [rec, sim] : strong) {
+        spdlog::info("  neighbour id={} sim={:.3f} content={}",
+                     rec.memory_id, sim, rec.content.substr(0, 100));
+    }
+    spdlog::info("Reconciler raw LLM response: {}", resp->substr(0, 300));
+
+    // Sanity: target_id (when set) must be one of the listed neighbours,
+    // otherwise the LLM hallucinated. Degrade to ADD.
+    if (decision.target_id != 0) {
+        bool valid = false;
+        for (const auto& nb : strong) {
+            if (nb.first.memory_id == decision.target_id) {
+                valid = true;
+                break;
+            }
+        }
+        if (!valid) {
+            spdlog::warn("Reconciler: LLM returned target_id={} not in neighbours; degrading to ADD",
+                         decision.target_id);
+            decision.op = ReconcileOp::ADD;
+            decision.target_id = 0;
+            decision.from_fallback = true;
+            decision.rationale = "LLM target_id not in neighbours; " + decision.rationale;
+        }
+    }
+
+    // Tally
+    {
+        std::lock_guard lock(stats_mu_);
+        switch (decision.op) {
+            case ReconcileOp::ADD:       stats_.op_add++;       break;
+            case ReconcileOp::REPLACE:   stats_.op_replace++;   break;
+            case ReconcileOp::RETRACT:   stats_.op_retract++;   break;
+            case ReconcileOp::REINFORCE: stats_.op_reinforce++; break;
+            case ReconcileOp::NOOP:      stats_.op_noop++;      break;
+        }
+    }
+
+    // Log entry with latency
+    auto elapsed = std::chrono::steady_clock::now() - start_time;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    appendLog(LogEntry{
+        .timestamp_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count()),
+        .candidate = candidate_content.substr(0, 200),
+        .op = decision.op,
+        .target_id = decision.target_id,
+        .latency_ms = static_cast<uint64_t>(ms),
+        .from_fallback = decision.from_fallback,
+    });
+
+    return decision;
+}
+
+Reconciler::Stats Reconciler::stats() const {
+    std::lock_guard lock(stats_mu_);
+    return stats_;
+}
+
+void Reconciler::appendLog(LogEntry entry) {
+    std::lock_guard lock(log_mu_);
+    log_.push_back(std::move(entry));
+    if (log_.size() > LOG_CAPACITY) {
+        log_.pop_front();
+    }
+}
+
+std::vector<Reconciler::LogEntry> Reconciler::recentLog(size_t limit) const {
+    std::lock_guard lock(log_mu_);
+    std::vector<LogEntry> result;
+    size_t count = std::min(limit, log_.size());
+    result.reserve(count);
+    // Newest first
+    for (auto it = log_.rbegin(); it != log_.rend() && result.size() < count; ++it) {
+        result.push_back(*it);
+    }
+    return result;
+}
+
+}  // namespace amind

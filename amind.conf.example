@@ -1,0 +1,207 @@
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║                   amind — Agent's Mind Configuration                    ║
+# ║          Production-grade memory engine for AI Agents                   ║
+# ║                                                                        ║
+# ║  Docs   : https://github.com/anthropics/amind                         ║
+# ║  Format : key = value (lines starting with # are comments)             ║
+# ║  Override: Environment variable AMIND_<KEY> overrides any key          ║
+# ║           (e.g. AMIND_PORT=9090 overrides port = 8080)                 ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ Server — REST API network settings                                      │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+host = 127.0.0.1
+port = 8080
+max_connections = 128
+request_timeout_ms = 30000
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ WebUI Dashboard — built-in web interface                                │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+webui_enabled = true
+webui_port = 11011
+webui_root = web/dist
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ Provider: LLM — large language model for intent detection & extraction  │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+# Provider name. Supported: ollama, openai, nvidia, anthropic (claude)
+llm_provider = ollama
+
+# Model name (must be available on the provider).
+#   ollama:     qwen3.5:9B, llama3.1:8b, etc.
+#   openai:     gpt-4o, gpt-4o-mini, etc.
+#   nvidia:     deepseek-ai/deepseek-v4-pro, etc.
+#   anthropic:  claude-opus-4-6, claude-sonnet-4-20250514, etc.
+llm_model = qwen3.5:9B
+
+# Provider connection settings.
+#   ollama:     127.0.0.1:11434
+#   openai:     api.openai.com:443
+#   nvidia:     integrate.api.nvidia.com:443
+#   anthropic:  api.anthropic.com:443
+llm_host = 127.0.0.1
+llm_port = 11434
+
+# API key. For cloud providers, set your key here or via environment variable:
+#   export OPENAI_API_KEY=sk-xxxxx
+#   export ANTHROPIC_API_KEY=sk-ant-xxxxx
+#llm_api_key = your-api-key-here
+
+# Base URL path prefix (default: /v1).
+#llm_base_url =
+
+# Extra HTTP headers (semicolon-separated Key:Value pairs).
+#llm_extra_headers =
+
+# ── LLM Fallback (multi-level degradation) ──
+# Semicolon-separated additional API keys for failover.
+#llm_fallback_keys =
+llm_fallback_threshold = 3
+llm_fallback_cooldown = 30
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ Provider: Embedding — text → vector for semantic search                 │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+embed_provider = ollama
+embed_model = qwen3-embedding
+embed_host = 127.0.0.1
+embed_port = 11434
+embed_base_url =
+embedding_dimension = 4096
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ Provider: Reranker (Reserved)                                           │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+rerank_provider = none
+rerank_model =
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ Connection Pool — HTTP keep-alive pool for provider calls               │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+pool_max_connections = 8
+pool_idle_timeout_ms = 30000
+pool_circuit_threshold = 5
+pool_circuit_cooldown_ms = 10000
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ HNSW Vector Index — approximate nearest-neighbor search                 │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+hnsw_max_connections = 16
+hnsw_ef_construction = 200
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ Hot/Cold Tiering — memory-efficient vector storage                      │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+hot_capacity = 50000
+cold_tier_path =
+eviction_ratio = 0.1
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ Memory Engine — core memory behavior tuning                             │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+decay_rate = 0.01
+importance_boost = 0.1
+stale_threshold_hours = 720
+conflict_similarity_threshold = 0.85
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ Retrieval Weights — scoring formula for memory recall                   │
+# │ Final score = Σ (weight × sub-score). All weights should sum to 1.0.    │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+semantic_weight = 0.4
+keyword_weight = 0.25
+graph_weight = 0.15
+recency_weight = 0.1
+importance_weight = 0.1
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ Async Pipeline — background task processing                             │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+async_worker_threads = 8
+async_queue_capacity = 10000
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ Session — conversation tracking settings                                │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+max_recent_turns = 10
+initial_memory_load_count = 20
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ Data & Logging                                                          │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+data_dir = ./amind_data
+log_level = info
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ LSM Storage Engine                                                      │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+lsm_flush_interval = 30
+wal_max_size = 104857600
+wal_expiry_seconds = 3600
+sst_target_size = 4194304
+l0_compaction_threshold = 4
+level_size_multiplier = 10
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ HNSW Persistence                                                        │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+hnsw_save_interval = 60
+sst_use_mmap = true
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ V2 Feature Gates — gradual rollout of new memory capabilities           │
+# │                                                                         │
+# │ Shadow mode: V2 logic computes results but does NOT enforce them.       │
+# │ To fully enable: set feature = true AND global_shadow_mode = false.     │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+v2_write_gate_enabled = true
+v2_lineage_propagation_enabled = true
+v2_forget_score_enabled = false
+v2_hnsw_compact_enabled = false
+v2_conflict_resolver_enabled = false
+v2_consolidation_enabled = false
+v2_reconcile_enabled = true
+v2_reconcile_similarity_floor = 0.30
+v2_reconcile_max_neighbours = 3
+v2_global_shadow_mode = false
+
+# ── WriteGate thresholds ──
+v2_duplicate_threshold = 0.95
+v2_low_value_threshold = 0.15
+v2_deferred_threshold = 0.30
+
+# ── ForgetEngine ──
+v2_forget_gc_interval = 3600
+v2_forget_sample_ratio = 0.10
+v2_forget_decay_threshold = 0.3
+v2_forget_archive_threshold = 0.6
+v2_forget_tombstone_threshold = 0.85
+
+# ── ConflictResolver ──
+v2_conflict_llm_judge = false
+
+# ── Consolidation ──
+v2_consolidation_interval = 3600
+v2_consolidation_mode = incremental
+v2_consolidation_sampled_full_every = 24
+v2_consolidation_sampled_full_ratio = 0.05
+v2_consolidation_dedup_threshold = 0.95
+v2_consolidation_drift_threshold = 0.3

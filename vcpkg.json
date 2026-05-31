@@ -1,0 +1,14 @@
+{
+  "name": "amind",
+  "version-string": "0.1.0",
+  "description": "Agent's Mind - Production-grade memory engine for AI Agents",
+  "homepage": "https://github.com/amind/amind",
+  "dependencies": [
+    "gtest",
+    "xxhash",
+    "crc32c",
+    "msgpack-c",
+    "nlohmann-json",
+    "spdlog"
+  ]
+}

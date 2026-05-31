@@ -1,0 +1,207 @@
+syntax = "proto3";
+package amind;
+
+// ── Enums ──────────────────────────────────────────────────────────────────
+enum MemoryOwner {
+    OWNER_USER = 0;
+    OWNER_PROJECT = 1;
+    OWNER_AGENT = 2;
+    OWNER_SESSION = 3;
+    OWNER_SHARED = 4;
+}
+
+enum MemoryPhase {
+    PHASE_ACTIVE = 0;
+    PHASE_VERSIONED = 1;
+    PHASE_ARCHIVED = 2;
+    PHASE_TOMBSTONE = 3;
+}
+
+enum Confidence {
+    CONFIDENCE_VERIFIED = 0;
+    CONFIDENCE_INFERRED = 1;
+    CONFIDENCE_STALE = 2;
+    CONFIDENCE_CONFLICTED = 3;
+}
+
+// ── Core Messages ──────────────────────────────────────────────────────────
+message Memory {
+    uint64 memory_id = 1;
+    string content = 2;
+    MemoryOwner owner = 3;
+    MemoryPhase phase = 4;
+    Confidence confidence = 5;
+    float importance = 6;
+    uint32 access_count = 7;
+    uint32 version = 8;
+    uint64 parent_id = 9;
+    uint64 created_at = 10;
+    uint64 last_accessed = 11;
+    string agent_id = 12;
+    map<string, string> metadata = 13;
+    repeated float embedding = 14;
+    uint32 source_turn = 15;
+    uint64 source_session_id = 16;
+}
+
+message MemoryResult {
+    Memory memory = 1;
+    float score = 2;
+    float semantic_score = 3;
+    float keyword_score = 4;
+    float graph_score = 5;
+    float recency_score = 6;
+}
+
+// ── Store ──────────────────────────────────────────────────────────────────
+message StoreRequest {
+    string content = 1;
+    repeated Message messages = 2;
+    MemoryOwner owner = 3;
+    string agent_id = 4;
+    map<string, string> metadata = 5;
+    repeated float embedding = 6;
+    bool async = 7;
+}
+
+message StoreResponse {
+    repeated uint64 memory_ids = 1;
+    bool async_refinement_scheduled = 2;
+    int32 facts_extracted = 3;
+    int32 added = 4;
+    int32 updated = 5;
+    int32 deleted = 6;
+    int32 skipped = 7;
+}
+
+message Message {
+    string role = 1;
+    string content = 2;
+}
+
+// ── Recall ─────────────────────────────────────────────────────────────────
+message RecallRequest {
+    string query = 1;
+    string agent_id = 2;
+    int32 top_k = 3;
+    MemoryOwner owner_filter = 4;
+    bool analyze_intent = 5;
+}
+
+message RecallResponse {
+    repeated MemoryResult results = 1;
+    QueryIntent intent = 2;
+}
+
+message QueryIntent {
+    string rewritten_query = 1;
+    repeated string entities = 2;
+    string time_range = 3;
+    MemoryOwner preferred_owner = 4;
+    float urgency = 5;
+}
+
+// ── Version History ────────────────────────────────────────────────────────
+message HistoryRequest {
+    uint64 memory_id = 1;
+    int32 max_depth = 2;
+}
+
+message HistoryResponse {
+    repeated Memory versions = 1;
+}
+
+// ── Feedback ───────────────────────────────────────────────────────────────
+message FeedbackRequest {
+    uint64 memory_id = 1;
+    string feedback_text = 2;
+    string signal = 3;
+}
+
+message FeedbackResponse {
+    string action_taken = 1;
+    uint64 new_version_id = 2;
+}
+
+// ── Intercept ──────────────────────────────────────────────────────────────
+message InterceptRequest {
+    repeated Message messages = 1;
+    string agent_id = 2;
+    bool inject_memories = 3;
+    int32 max_injected = 4;
+}
+
+message InterceptResponse {
+    repeated Memory injected_memories = 1;
+    string system_prompt_addition = 2;
+    bool capture_scheduled = 3;
+}
+
+// ── MetaCognition ──────────────────────────────────────────────────────────
+message CoverageRequest {
+    string agent_id = 1;
+    MemoryOwner owner = 2;
+}
+
+message CoverageResponse {
+    int32 total_memories = 1;
+    int32 active_memories = 2;
+    int32 stale_memories = 3;
+    int32 conflicted_memories = 4;
+    map<string, int32> topic_distribution = 5;
+    uint64 last_updated = 6;
+}
+
+message ConflictListResponse {
+    repeated ConflictPair conflicts = 1;
+}
+
+message ConflictPair {
+    uint64 memory_a = 1;
+    uint64 memory_b = 2;
+    string conflict_type = 3;
+    string explanation = 4;
+}
+
+// ── Session ────────────────────────────────────────────────────────────────
+message SessionStartRequest {
+    string agent_id = 1;
+    string initial_query = 2;
+}
+
+message SessionStartResponse {
+    uint64 session_id = 1;
+    repeated Memory preloaded_memories = 2;
+}
+
+message SessionTurnRequest {
+    uint64 session_id = 1;
+    string user_message = 2;
+    string assistant_message = 3;
+}
+
+message SessionCloseRequest {
+    uint64 session_id = 1;
+    string task_summary = 2;
+}
+
+// ── Services ───────────────────────────────────────────────────────────────
+service MemoryService {
+    rpc Store(StoreRequest) returns (StoreResponse);
+    rpc Recall(RecallRequest) returns (RecallResponse);
+    rpc GetMemory(HistoryRequest) returns (Memory);
+    rpc GetHistory(HistoryRequest) returns (HistoryResponse);
+    rpc Feedback(FeedbackRequest) returns (FeedbackResponse);
+    rpc Intercept(InterceptRequest) returns (InterceptResponse);
+}
+
+service MetaCognitionService {
+    rpc GetCoverage(CoverageRequest) returns (CoverageResponse);
+    rpc GetConflicts(CoverageRequest) returns (ConflictListResponse);
+}
+
+service SessionService {
+    rpc Start(SessionStartRequest) returns (SessionStartResponse);
+    rpc Turn(SessionTurnRequest) returns (StoreResponse);
+    rpc Close(SessionCloseRequest) returns (StoreResponse);
+}

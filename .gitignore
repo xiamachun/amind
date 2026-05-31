@@ -1,0 +1,64 @@
+# ── Build artifacts ──────────────────────────────────────────────────────────
+build/
+cmake-build-*/
+out/
+
+# ── IDE ─────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.cache/
+compile_commands.json
+
+# ── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── C++ artifacts ───────────────────────────────────────────────────────────
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+
+# ── vcpkg ───────────────────────────────────────────────────────────────────
+vcpkg_installed/
+
+# ── Project docs (local only) ───────────────────────────────────────────────
+CLAUDE.md
+docs/
+eval/
+src/**/architecture.md
+
+# ── Local scripts & runtime files ──────────────────────────────────────────
+.amind.pid
+amind.log
+
+# ── Config (contains API keys — use amind.conf.example as template) ────────
+amind.conf
+
+# ── Data ────────────────────────────────────────────────────────────────────
+amind_data/
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.venv/
+
+# ── AI assistant local files ────────────────────────────────────────────────
+.claude/
+
+# ── Demo scripts (not part of core) ────────────────────────────────────────
+agent-demo/
+bench/
+
+# ── Code style config (local preference) ────────────────────────────────────
+.clang-format
+.clang-tidy
+
+# ── Tests (kept locally, not shipped in release) ───────────────────────────
+tests/

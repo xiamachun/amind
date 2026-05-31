@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: linux-amd64
+            cmake_extra: ""
+          - os: ubuntu-22.04
+            target: linux-arm64
+            cmake_extra: "-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64.cmake"
+          - os: macos-14
+            target: darwin-arm64
+            cmake_extra: ""
+          - os: macos-13
+            target: darwin-amd64
+            cmake_extra: ""
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Linux native dependencies ────────────────────────────────────────
+      - name: Install dependencies (Linux amd64)
+        if: matrix.target == 'linux-amd64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake \
+            libssl-dev libxxhash-dev libcrc32c-dev \
+            libmsgpack-dev nlohmann-json3-dev \
+            libspdlog-dev libfmt-dev liblz4-dev
+
+      # ── Linux ARM64 cross-compile dependencies ───────────────────────────
+      - name: Install dependencies (Linux arm64 cross)
+        if: matrix.target == 'linux-arm64'
+        run: |
+          sudo dpkg --add-architecture arm64
+          # Add arm64 package sources
+          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ jammy main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          sudo apt-get install -y \
+            libssl-dev:arm64 libxxhash-dev:arm64 libcrc32c-dev:arm64 \
+            libmsgpack-dev:arm64 nlohmann-json3-dev:arm64 \
+            libspdlog-dev:arm64 libfmt-dev:arm64 liblz4-dev:arm64 \
+            || echo "⚠ Some arm64 packages may not be available; build may need adjustments"
+
+      # ── macOS dependencies ───────────────────────────────────────────────
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install spdlog nlohmann-json xxhash crc32c \
+            msgpack-cxx lz4 openssl fmt
+
+      # ── Configure & Build ────────────────────────────────────────────────
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DAMIND_BUILD_TESTS=OFF \
+            -DAMIND_BUILD_BENCHMARKS=OFF \
+            -DAMIND_ENABLE_ASAN=OFF \
+            ${{ matrix.cmake_extra }}
+
+      - name: Build
+        run: |
+          cmake --build build --config Release --target amind \
+            -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
+      - name: Strip binary
+        run: |
+          if [[ "${{ matrix.target }}" == "linux-arm64" ]]; then
+            aarch64-linux-gnu-strip build/amind
+          else
+            strip build/amind
+          fi
+
+      # ── Package ──────────────────────────────────────────────────────────
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          PKG="amind-${VERSION}-${{ matrix.target }}"
+          mkdir -p "${PKG}"
+          cp build/amind          "${PKG}/"
+          cp amind.conf.example   "${PKG}/"
+          cp amind.sh             "${PKG}/"
+          cp README.md            "${PKG}/"
+          [ -f LICENSE ] && cp LICENSE "${PKG}/" || true
+          chmod +x "${PKG}/amind" "${PKG}/amind.sh"
+          tar czf "${PKG}.tar.gz" "${PKG}"
+          echo "pkg_file=${PKG}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: amind-${{ matrix.target }}
+          path: ${{ env.pkg_file }}
+          retention-days: 5
+
+  # ── Create GitHub Release ──────────────────────────────────────────────
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum *.tar.gz > SHA256SUMS.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}

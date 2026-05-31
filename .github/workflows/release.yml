@@ -13,8 +13,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  webui:
+    name: Build WebUI
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build
+        run: cd web && npm ci && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webui-dist
+          path: web/dist
+          retention-days: 1
+
   build:
     name: Build ${{ matrix.target }}
+    needs: webui
     strategy:
       fail-fast: false
       matrix:
@@ -115,15 +132,12 @@ jobs:
             strip build/amind
           fi
 
-      # ── Build WebUI ────────────────────────────────────────────────────────
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      # ── Download WebUI ─────────────────────────────────────────────────────
+      - name: Download WebUI
+        uses: actions/download-artifact@v4
         with:
-          node-version: '20'
-
-      - name: Build WebUI
-        run: |
-          cd web && npm ci && npm run build
+          name: webui-dist
+          path: web/dist
 
       # ── Package ──────────────────────────────────────────────────────────
       - name: Package

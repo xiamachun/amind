@@ -43,10 +43,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential cmake \
-            libssl-dev libxxhash-dev libcrc32c-dev \
+            build-essential cmake git \
+            libssl-dev libxxhash-dev \
             libmsgpack-dev nlohmann-json3-dev \
             libspdlog-dev libfmt-dev liblz4-dev
+          # crc32c — not in Ubuntu 22.04 repos, build from source
+          cd /tmp && git clone https://github.com/google/crc32c.git
+          cd crc32c && git submodule update --init --recursive
+          mkdir build && cd build
+          cmake .. -DCRC32C_BUILD_TESTS=OFF -DCRC32C_BUILD_BENCHMARKS=OFF \
+            -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SHARED_LIBS=ON
+          make -j$(nproc) && sudo make install && sudo ldconfig
 
       # ── Linux ARM64 cross-compile dependencies ───────────────────────────
       - name: Install dependencies (Linux arm64 cross)
@@ -62,10 +69,20 @@ jobs:
             build-essential cmake \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
           sudo apt-get install -y \
-            libssl-dev:arm64 libxxhash-dev:arm64 libcrc32c-dev:arm64 \
+            libssl-dev:arm64 libxxhash-dev:arm64 \
             libmsgpack-dev:arm64 nlohmann-json3-dev:arm64 \
             libspdlog-dev:arm64 libfmt-dev:arm64 liblz4-dev:arm64 \
-            || echo "⚠ Some arm64 packages may not be available; build may need adjustments"
+            || echo "⚠ Some arm64 packages may not be available"
+          # crc32c — cross-compile from source for arm64
+          cd /tmp && git clone https://github.com/google/crc32c.git
+          cd crc32c && git submodule update --init --recursive
+          mkdir build && cd build
+          cmake .. -DCRC32C_BUILD_TESTS=OFF -DCRC32C_BUILD_BENCHMARKS=OFF \
+            -DCMAKE_INSTALL_PREFIX=/usr/aarch64-linux-gnu \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DBUILD_SHARED_LIBS=ON
+          make -j$(nproc) && sudo make install
 
       # ── macOS dependencies ───────────────────────────────────────────────
       - name: Install dependencies (macOS)

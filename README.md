@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/logo.png" alt="Amind Logo" width="200">
+  <img src=".github/images/logo.png" alt="Amind Logo" width="200">
 </p>
 
 <h1 align="center">Amind — Agent's Mind</h1>

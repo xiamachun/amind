@@ -9,6 +9,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# ── SIMD: enable SSE3/SSE4.1 on x86_64 for HNSW distance computation ──────
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64|i[3-6]86)")
+    add_compile_options(-msse3 -msse4.1)
+endif()
+
 # ── TLS/HTTPS support ─────────────────────────────────────────────────────
 option(AMIND_ENABLE_TLS "Enable TLS/HTTPS support" OFF)
 if(AMIND_ENABLE_TLS)

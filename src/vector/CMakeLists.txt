@@ -16,7 +16,3 @@ target_link_libraries(amind_vector
         spdlog::spdlog
 )
 
-# Enable SIMD instructions for distance computation
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64|i[3-6]86)")
-    target_compile_options(amind_vector PRIVATE -msse3 -msse4.1)
-endif()

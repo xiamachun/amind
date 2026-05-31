@@ -8,7 +8,12 @@ set -euo pipefail
 # ── Paths ───────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
-BINARY="${BUILD_DIR}/amind"
+# Prefer local binary (release package) over build directory
+if [[ -x "${SCRIPT_DIR}/amind" ]]; then
+    BINARY="${SCRIPT_DIR}/amind"
+else
+    BINARY="${BUILD_DIR}/amind"
+fi
 CONFIG="${SCRIPT_DIR}/amind.conf"
 PID_FILE="${SCRIPT_DIR}/.amind.pid"
 LOG_FILE="${SCRIPT_DIR}/amind.log"

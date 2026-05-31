@@ -77,7 +77,6 @@ vim amind.conf  # 填入你的 LLM API Key 和 Embedding 配置
 | **Linux x86_64** | [amind-v0.1.0-linux-amd64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-linux-amd64.tar.gz) | 云服务器、VPS、Docker |
 | **Linux ARM64** | [amind-v0.1.0-linux-arm64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-linux-arm64.tar.gz) | AWS Graviton、树莓派、Oracle ARM |
 | **macOS Apple Silicon** | [amind-v0.1.0-darwin-arm64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-darwin-arm64.tar.gz) | M1/M2/M3/M4 Mac |
-| **macOS Intel** | [amind-v0.1.0-darwin-amd64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-darwin-amd64.tar.gz) | 2020 年前的 Mac |
 
 > **系统要求：** Linux 需要 glibc 2.35+（Ubuntu 22.04+ / Debian 12+ / Fedora 36+ / RHEL 9+），macOS 12+。
 

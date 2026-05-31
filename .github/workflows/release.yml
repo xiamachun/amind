@@ -21,10 +21,10 @@ jobs:
         include:
           - os: ubuntu-22.04
             target: linux-amd64
-            cmake_extra: ""
+            cmake_extra: "-DCMAKE_EXE_LINKER_FLAGS=-static-libgcc\ -static-libstdc++"
           - os: ubuntu-22.04
             target: linux-arm64
-            cmake_extra: "-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64.cmake"
+            cmake_extra: "-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64.cmake -DCMAKE_EXE_LINKER_FLAGS=-static-libgcc\ -static-libstdc++"
           - os: macos-14
             target: darwin-arm64
             cmake_extra: ""

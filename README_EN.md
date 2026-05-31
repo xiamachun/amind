@@ -67,10 +67,32 @@ vim amind.conf  # Fill in your LLM API Key and Embedding config
 # Start
 ./amind.sh start
 ./amind.sh status    # Check running status
+# WebUI: http://localhost:11011
 ```
 
 <details>
-<summary>Other platforms</summary>
+<summary>macOS Users</summary>
+
+```bash
+# macOS Apple Silicon (M1/M2/M3/M4)
+curl -LO https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-darwin-arm64.tar.gz
+tar xzf amind-v0.1.0-darwin-arm64.tar.gz && cd amind-v0.1.0-darwin-arm64
+
+# Remove macOS Gatekeeper quarantine flag (required on first download)
+xattr -cr .
+
+# Initialize config and start
+cp amind.conf.example amind.conf
+vim amind.conf  # Fill in your LLM API Key and Embedding config
+./amind.sh start
+```
+
+> If you still see a "cannot verify developer" dialog, click "Done" then go to **System Settings → Privacy & Security** and click "Allow Anyway" at the bottom.
+
+</details>
+
+<details>
+<summary>All platforms</summary>
 
 | Platform | Download | Use Case |
 |----------|----------|----------|
@@ -78,7 +100,7 @@ vim amind.conf  # Fill in your LLM API Key and Embedding config
 | **Linux ARM64** | [amind-v0.1.0-linux-arm64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-linux-arm64.tar.gz) | AWS Graviton, Raspberry Pi, Oracle ARM |
 | **macOS Apple Silicon** | [amind-v0.1.0-darwin-arm64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-darwin-arm64.tar.gz) | M1/M2/M3/M4 Mac |
 
-> **System requirements:** Linux requires glibc 2.35+ (Ubuntu 22.04+ / Debian 12+ / Fedora 36+ / RHEL 9+), macOS 12+.
+> **System requirements:** Linux (Ubuntu 20.04+ / Debian 11+ / CentOS 9+ / RHEL 9+), macOS 12+.
 
 </details>
 

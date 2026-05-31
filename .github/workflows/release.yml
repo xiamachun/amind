@@ -115,16 +115,27 @@ jobs:
             strip build/amind
           fi
 
+      # ── Build WebUI ────────────────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build WebUI
+        run: |
+          cd web && npm ci && npm run build
+
       # ── Package ──────────────────────────────────────────────────────────
       - name: Package
         run: |
           VERSION="${GITHUB_REF_NAME}"
           PKG="amind-${VERSION}-${{ matrix.target }}"
-          mkdir -p "${PKG}"
+          mkdir -p "${PKG}/web"
           cp build/amind          "${PKG}/"
           cp amind.conf.example   "${PKG}/"
           cp amind.sh             "${PKG}/"
           cp README.md            "${PKG}/"
+          cp -r web/dist          "${PKG}/web/dist"
           [ -f LICENSE ] && cp LICENSE "${PKG}/" || true
           chmod +x "${PKG}/amind" "${PKG}/amind.sh"
           tar czf "${PKG}.tar.gz" "${PKG}"

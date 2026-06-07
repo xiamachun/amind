@@ -204,7 +204,7 @@ export default function Events() {
             <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase">
               <th className="text-left px-3 py-3 w-32">Kind</th>
               <th className="text-left px-3 py-3 w-20">Status</th>
-              <th className="text-left px-3 py-3 w-28">NS</th>
+              <th className="text-left px-3 py-3 w-28">Agent</th>
               <th className="text-left px-3 py-3 w-32">Memory</th>
               <th className="text-left px-3 py-3 w-32">Trace</th>
               <th className="text-left px-3 py-3 w-20">Dur</th>

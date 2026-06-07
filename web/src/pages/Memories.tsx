@@ -97,11 +97,11 @@ export default function Memories() {
   useEffect(() => { setSelected(new Set()) }, [page])
 
   const ownerColors: Record<string, string> = {
-    User: 'bg-blue-900/50 text-blue-300',
-    Project: 'bg-purple-900/50 text-purple-300',
-    Agent: 'bg-green-900/50 text-green-300',
-    Session: 'bg-yellow-900/50 text-yellow-300',
-    Shared: 'bg-pink-900/50 text-pink-300',
+    user: 'bg-blue-900/50 text-blue-300',
+    project: 'bg-purple-900/50 text-purple-300',
+    agent: 'bg-green-900/50 text-green-300',
+    session: 'bg-yellow-900/50 text-yellow-300',
+    system: 'bg-pink-900/50 text-pink-300',
   }
 
   return (
@@ -178,7 +178,7 @@ export default function Memories() {
         <select value={owner} onChange={e => updateFilter('owner', e.target.value)}
           className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200">
           <option value="">All Scopes</option>
-          {['User','Project','Agent','Session','Shared'].map(o =>
+          {['user','project','agent','session','system'].map(o =>
             <option key={o} value={o}>{o}</option>)}
         </select>
         <select value={phase} onChange={e => updateFilter('phase', e.target.value)}
@@ -236,9 +236,8 @@ export default function Memories() {
                   className="rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-indigo-500 cursor-pointer" />
               </th>
               <th className="text-left px-4 py-3">Content</th>
-              <th className="text-left px-4 py-3 w-32">User / Session</th>
+              <th className="text-left px-4 py-3 w-32">Owner</th>
               <th className="text-left px-4 py-3 w-20">Layer</th>
-              <th className="text-left px-4 py-3 w-24">Scope</th>
               <th className="text-left px-4 py-3 w-24">Phase</th>
               <th className="text-left px-4 py-3 w-20">Score</th>
               <th className="text-left px-4 py-3 w-36">Created</th>
@@ -246,13 +245,10 @@ export default function Memories() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
             ) : memories.length === 0 ? (
-              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-500">No memories found</td></tr>
+              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500">No memories found</td></tr>
             ) : memories.map(m => {
-              const meta = m.metadata || {}
-              const userTag = meta.user_id || meta.session_id || ''
-              const sessionTag = meta.session_id && meta.session_id !== userTag ? meta.session_id : ''
               return (
               <tr key={m.memory_id}
                 onClick={() => navigate(`/memories/${m.memory_id}`)}
@@ -266,17 +262,10 @@ export default function Memories() {
                 <td className="px-4 py-3 text-gray-300 truncate max-w-md">
                   {m.content.length > 100 ? m.content.slice(0, 100) + '...' : m.content}
                 </td>
-                <td className="px-4 py-3 text-xs">
-                  {userTag ? (
-                    <div className="flex flex-col gap-0.5">
-                      <span className="font-mono text-blue-300 truncate max-w-[110px]" title={userTag}>{userTag}</span>
-                      {sessionTag && (
-                        <span className="font-mono text-gray-500 truncate max-w-[110px]" title={sessionTag}>{sessionTag}</span>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="text-gray-600">—</span>
-                  )}
+                <td className="px-4 py-3">
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${ownerColors[m.owner] || 'bg-gray-800 text-gray-400'}`}>
+                    {m.owner}
+                  </span>
                 </td>
                 <td className="px-4 py-3">
                   {m.layer === 'Derived' ? (
@@ -290,11 +279,6 @@ export default function Memories() {
                       Raw
                     </span>
                   ) : <span className="text-xs text-gray-600">—</span>}
-                </td>
-                <td className="px-4 py-3">
-                  <span className={`text-xs px-2 py-0.5 rounded-full ${ownerColors[m.owner] || 'bg-gray-800 text-gray-400'}`}>
-                    {m.owner}
-                  </span>
                 </td>
                 <td className="px-4 py-3 text-gray-400 text-xs">{m.phase}</td>
                 <td className="px-4 py-3 text-gray-400">{m.importance.toFixed(2)}</td>

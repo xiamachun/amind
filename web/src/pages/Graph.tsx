@@ -32,8 +32,8 @@ export default function Graph() {
       }
 
       const nodeColor: Record<string, string> = {
-        User: '#6366f1', Project: '#8b5cf6', Agent: '#10b981',
-        Session: '#f59e0b', Shared: '#ec4899',
+        user: '#6366f1', project: '#8b5cf6', agent: '#10b981',
+        session: '#f59e0b', system: '#ec4899',
       }
 
       const nodes = new DataSet(

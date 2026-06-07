@@ -50,13 +50,8 @@ export default function Layout() {
     <div className="flex h-screen">
       <aside className="w-56 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col">
         <div className="px-5 py-6">
-          <div className="flex items-center gap-3">
-            <img src="/logo.png" alt="Amind" className="w-8 h-8 rounded" />
-            <div>
-              <h1 className="text-xl font-bold tracking-wide text-indigo-400">Amind</h1>
-              <p className="text-xs text-gray-500 mt-0.5">Memory Engine Dashboard</p>
-            </div>
-          </div>
+          <h1 className="text-xl font-bold tracking-wide text-indigo-400">Amind</h1>
+          <p className="text-xs text-gray-500 mt-1">Memory Engine Dashboard</p>
         </div>
 
         <nav className="flex-1 px-3 space-y-1">

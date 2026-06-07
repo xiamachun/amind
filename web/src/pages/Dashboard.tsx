@@ -32,7 +32,7 @@ export default function Dashboard() {
     ? ((metrics.pool_total_reused / metrics.pool_total_acquired) * 100).toFixed(1) + '%'
     : 'N/A'
 
-  const ownerData = Object.entries(coverage.owner_distribution || {}).map(([name, value]) => ({ name, value }))
+  const ownerData = Object.entries(coverage.scope_distribution || {}).map(([name, value]) => ({ name, value }))
   const phaseData = Object.entries(coverage.phase_distribution || {}).map(([name, value]) => ({ name, value }))
 
   return (

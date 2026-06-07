@@ -96,13 +96,7 @@ export default function Memories() {
 
   useEffect(() => { setSelected(new Set()) }, [page])
 
-  const ownerColors: Record<string, string> = {
-    user: 'bg-blue-900/50 text-blue-300',
-    project: 'bg-purple-900/50 text-purple-300',
-    agent: 'bg-green-900/50 text-green-300',
-    session: 'bg-yellow-900/50 text-yellow-300',
-    system: 'bg-pink-900/50 text-pink-300',
-  }
+
 
   return (
     <div className="space-y-4">
@@ -236,7 +230,7 @@ export default function Memories() {
                   className="rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-indigo-500 cursor-pointer" />
               </th>
               <th className="text-left px-4 py-3">Content</th>
-              <th className="text-left px-4 py-3 w-32">Owner</th>
+              <th className="text-left px-4 py-3 w-40">Agent / User</th>
               <th className="text-left px-4 py-3 w-20">Layer</th>
               <th className="text-left px-4 py-3 w-24">Phase</th>
               <th className="text-left px-4 py-3 w-20">Score</th>
@@ -263,9 +257,13 @@ export default function Memories() {
                   {m.content.length > 100 ? m.content.slice(0, 100) + '...' : m.content}
                 </td>
                 <td className="px-4 py-3">
-                  <span className={`text-xs px-2 py-0.5 rounded-full ${ownerColors[m.owner] || 'bg-gray-800 text-gray-400'}`}>
-                    {m.owner}
-                  </span>
+                  {m.agent_id ? (
+                    <span className="text-xs text-indigo-400 truncate block max-w-[160px]" title={`${m.agent_id} / ${m.user_id || '—'}`}>
+                      {m.agent_id}{m.user_id ? ` / ${m.user_id}` : ''}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-gray-600">—</span>
+                  )}
                 </td>
                 <td className="px-4 py-3">
                   {m.layer === 'Derived' ? (

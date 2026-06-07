@@ -32,15 +32,14 @@ export default function Graph() {
       }
 
       const nodeColor: Record<string, string> = {
-        user: '#6366f1', project: '#8b5cf6', agent: '#10b981',
-        session: '#f59e0b', system: '#ec4899',
+        private: '#6366f1', agent_shared: '#10b981', system: '#ec4899',
       }
 
       const nodes = new DataSet(
         ids.map(id => {
           const m = memMap[id]
           const label = m ? m.content.slice(0, 30) + (m.content.length > 30 ? '...' : '') : id.slice(0, 8)
-          const color = m ? (nodeColor[m.owner] || '#6b7280') : '#6b7280'
+          const color = m ? (nodeColor[m.scope] || '#6b7280') : '#6b7280'
           return { id, label, color, font: { color: '#e5e7eb', size: 11 } }
         })
       )
@@ -115,7 +114,7 @@ export default function Graph() {
             <h3 className="text-sm font-medium text-gray-300">Selected Memory</h3>
             <p className="text-xs text-gray-400 whitespace-pre-wrap">{selected.content}</p>
             <div className="grid grid-cols-2 gap-2 text-xs">
-              <div><span className="text-gray-500">Scope:</span> <span className="text-indigo-300">{selected.owner}</span></div>
+              <div><span className="text-gray-500">Agent:</span> <span className="text-indigo-300">{selected.agent_id}</span></div>
               <div><span className="text-gray-500">Phase:</span> <span className="text-gray-300">{selected.phase}</span></div>
               <div><span className="text-gray-500">Score:</span> <span className="text-gray-300">{selected.importance.toFixed(3)}</span></div>
               <div><span className="text-gray-500">Version:</span> <span className="text-gray-300">{selected.version}</span></div>

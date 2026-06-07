@@ -241,8 +241,8 @@ export default function MemoryDetail() {
             <p className="text-xs text-gray-400 font-mono break-all">{memory.memory_id}</p>
           </div>
           <div>
-            <p className="text-xs text-gray-500">Scope</p>
-            <p className="text-sm text-indigo-300">{memory.owner}</p>
+            <p className="text-xs text-gray-500">Agent / User</p>
+            <p className="text-sm text-indigo-300">{memory.agent_id}{memory.user_id ? ` / ${memory.user_id}` : ''}</p>
           </div>
           <div>
             <p className="text-xs text-gray-500">Phase</p>

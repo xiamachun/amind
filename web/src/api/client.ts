@@ -20,13 +20,15 @@ export interface Metrics {
 
 export interface CoverageStats {
   total: number; active: number; stale: number; conflicted: number
-  owner_distribution: Record<string, number>
+  scope_distribution: Record<string, number>
+  memory_type_distribution: Record<string, number>
   phase_distribution: Record<string, number>
   confidence_distribution: Record<string, number>
 }
 
 export interface Memory {
-  memory_id: string; content: string; owner: string; phase: string
+  memory_id: string; content: string; phase: string
+  agent_id: string; user_id: string; scope: string; memory_type: string
   confidence: string; importance: number; created_at: number
   last_accessed: number; access_count: number; version: number
   has_embedding: boolean

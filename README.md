@@ -301,15 +301,6 @@ curl -H "Authorization: Bearer $TOKEN" \
   http://localhost:8080/v1/metacognition/conflicts?agent_id=agent-1
 ```
 
-#### API Parameter Migration Guide
-
-| Old Parameter | New Parameters | Description |
-|---------------|----------------|-------------|
-| `namespace` | `agent_id` + `user_id` | 实现多用户多 Agent 物理隔离。`agent_id` 标识 Agent，`user_id` 标识用户 |
-| `owner` (user/agent/system) | `scope` + `memory_type` | `scope`: `private`（私有）或 `agent_shared`（Agent 共享）；`memory_type`: `preference`/`fact`/`domain_knowledge`/`procedure`/`episodic`/`ephemeral` |
-
-> 详见 [CHANGELOG](docs/CHANGELOG.md) 了解完整的变更历史。
-
 <details>
 <summary>Full API Reference</summary>
 

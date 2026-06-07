@@ -25,11 +25,27 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libssl-dev libmsgpack-dev
+          sudo apt-get install -y \
+            build-essential cmake git \
+            libssl-dev libxxhash-dev \
+            libmsgpack-dev nlohmann-json3-dev \
+            libspdlog-dev libfmt-dev liblz4-dev
+          # crc32c — not in Ubuntu repos, build from source
+          cd /tmp && git clone https://github.com/google/crc32c.git
+          cd crc32c && git submodule update --init --recursive
+          mkdir build && cd build
+          cmake .. -DCRC32C_BUILD_TESTS=OFF -DCRC32C_BUILD_BENCHMARKS=OFF \
+            -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SHARED_LIBS=ON
+          make -j$(nproc) && sudo make install && sudo ldconfig
       - name: Configure CMake
-        run: mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Debug
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DAMIND_BUILD_BENCHMARKS=OFF \
+            -DAMIND_ENABLE_TLS=ON \
+            -DBREW_PREFIX=/usr
       - name: Build
-        run: cd build && make -j$(nproc)
+        run: cmake --build build -j$(nproc)
       - name: Run tests
         run: cd build && ctest --output-on-failure -j$(nproc)
 

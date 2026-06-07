@@ -14,6 +14,11 @@ namespace amind {
 /// A task to be executed asynchronously (Stage 2 processing).
 struct AsyncTask {
     uint64_t memory_id{0};
+    /// Distributed-tracing trace identifier inherited from the synchronous
+    /// caller (e.g. Stage 1 fastStore generates a trace_id and threads it
+    /// through to Stage 2 here). Used by observability to group all events
+    /// of a single pipeline run. 0 = no trace context (legacy / standalone).
+    uint64_t trace_id{0};
     std::string task_type;  // "extract", "dedup", "conflict", "graph_link"
     std::function<void()> work;
 };

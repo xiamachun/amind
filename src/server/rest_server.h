@@ -41,11 +41,16 @@ private:
     std::string handleFeedback(const std::string& id_str, const std::string& body);
     std::string handleDeleteMemory(const std::string& id_str);
     std::string handleArchiveMemory(const std::string& id_str);
-    std::string handleDeleteNamespace(const std::string& ns);
+    std::string handleDeleteAgentMemories(const std::string& agent_id);
     std::string handleIntercept(const std::string& body);
     std::string handleCoverage(const std::string& query);
     std::string handleConflicts();
     std::string handleSessionStart(const std::string& body);
+    
+    // Agent Management
+    std::string handleRegisterAgent(const std::string& body);
+    std::string handleListAgents();
+    std::string handleUnregisterAgent(const std::string& agent_id);
     std::string handleSessionTurn(const std::string& id_str, const std::string& body);
     std::string handleSessionClose(const std::string& id_str, const std::string& body);
     std::string handleSessionSummary(const std::string& id_str);
@@ -56,29 +61,25 @@ private:
 
     std::string handleListMemories(const std::string& path);
     std::string handleListEdges(const std::string& path);
-    std::string handleGraphNeighbors(const std::string& id_str);
+    std::string handleGraphNeighbors(const std::string& id_str,
+                                     bool include_incoming = false);
     std::string handleListSessions();
     std::string handleCoverageStats(const std::string& query);
 
-    // Gate log audit + resurrect
-    std::string handleGateLogList(const std::string& path);
-    std::string handleGateLogStats(const std::string& path);
-    std::string handleGateLogResurrect(const std::string& id_str, const std::string& body);
-
-    // Forget log audit (read-only — recovery semantics are not in v1)
-    std::string handleForgetLog(const std::string& path);
-
-    // Recall staleness filter audit (read-only)
-    std::string handleRecallStaleLog(const std::string& path);
+    // Unified observability (MemoryEventLog) — single source of truth
+    // for Gate/Reconcile/GC/Stale/etc. The legacy per-subsystem handlers
+    // (handleGateLog*, handleForgetLog, handleRecallStaleLog, handlePipelineStats,
+    // handleReconcileLog) were removed in Phase 4.
+    std::string handleEventsQuery(const std::string& path);
+    std::string handleMemoryTrace(const std::string& id_str);
+    std::string handleTraceById(const std::string& trace_id_str);
+    std::string handleEventsStats(const std::string& path);
+    std::string handleAdminResurrect(const std::string& event_id_str, const std::string& body);
 
     // Manual triggers for V2 background workers (synchronous; useful for
     // observation in dev — production scheduler still runs every interval).
     std::string handleAdminForgetRun();
     std::string handleAdminConsolidationRun();
-
-    // Pipeline observability
-    std::string handlePipelineStats();
-    std::string handleReconcileLog(const std::string& path);
 
     // Auth key management
     std::string handleCreateKey(const std::string& body);
@@ -90,12 +91,15 @@ private:
     std::string handleSetVariable(const std::string& name, const std::string& body);
     std::string handleReloadConfig();
 
-    // HTTP helpers
+public:
+    // HTTP helpers — public so free-function helpers in the .cpp can reuse them.
     static std::string jsonResponse(int status, const std::string& body);
     static std::string errorResponse(int status, const std::string& message);
     static std::string extractQueryParam(const std::string& path, const std::string& key);
     static std::string urlDecode(const std::string& src);
     static void sendAll(int fd, const std::string& data);
+
+private:
 
     void workerLoop();
 

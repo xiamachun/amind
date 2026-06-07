@@ -19,9 +19,13 @@ Result<std::string> BackupManager::exportMemories() {
         json j;
         j["memory_id"] = record.memory_id;
         j["content"] = record.content;
-        j["owner"] = ownerToString(record.owner);
+        j["agent_id"] = record.agent_id;
+        j["user_id"] = record.user_id;
+        j["scope"] = scopeToString(record.scope);
+        j["memory_type"] = memoryTypeToString(record.memory_type);
+        j["tier"] = memoryTierToString(record.tier);
         j["phase"] = phaseToString(record.phase);
-        j["confidence"] = confidenceToString(record.confidence);
+        j["confidence"] = confidenceToString(record.confidence_level);
         j["importance"] = record.importance;
         j["version"] = record.mem_version;
         j["parent_id"] = record.parent_id;
@@ -30,7 +34,6 @@ Result<std::string> BackupManager::exportMemories() {
         j["access_count"] = record.access_count;
         j["source_turn"] = record.source_turn;
         j["flags"] = record.flags;
-        j["namespace_hash"] = record.namespace_hash;
 
         // Export embedding as array of floats
         if (!record.embedding.empty()) {
@@ -60,6 +63,19 @@ Result<size_t> BackupManager::importMemories(const std::string& jsonl) {
             MemoryRecord record;
             record.memory_id = j.value("memory_id", uint64_t(0));
             record.content = j.value("content", "");
+            record.agent_id = j.value("agent_id", "default_agent");
+            record.user_id = j.value("user_id", "anonymous");
+            
+            // Parse new scope and type
+            auto scope_str = j.value("scope", "private");
+            record.scope = scopeFromString(scope_str);
+            
+            auto type_str = j.value("memory_type", "ephemeral");
+            record.memory_type = memoryTypeFromString(type_str);
+            
+            auto tier_str = j.value("tier", "ephemeral");
+            record.tier = memoryTierFromString(tier_str);
+
             record.importance = j.value("importance", 0.5f);
             record.mem_version = j.value("version", uint32_t(1));
             record.parent_id = j.value("parent_id", uint64_t(0));
@@ -68,15 +84,6 @@ Result<size_t> BackupManager::importMemories(const std::string& jsonl) {
             record.access_count = j.value("access_count", uint32_t(0));
             record.source_turn = j.value("source_turn", uint16_t(0));
             record.flags = j.value("flags", uint16_t(RecordFlags::ALIVE));
-            record.namespace_hash = j.value("namespace_hash", uint64_t(0));
-
-            // Parse owner
-            auto owner_str = j.value("owner", "Session");
-            if (owner_str == "User") record.owner = MemoryOwner::User;
-            else if (owner_str == "Project") record.owner = MemoryOwner::Project;
-            else if (owner_str == "Agent") record.owner = MemoryOwner::Agent;
-            else if (owner_str == "Shared") record.owner = MemoryOwner::Shared;
-            else record.owner = MemoryOwner::Session;
 
             // Parse phase
             auto phase_str = j.value("phase", "Active");
@@ -87,10 +94,10 @@ Result<size_t> BackupManager::importMemories(const std::string& jsonl) {
 
             // Parse confidence
             auto conf_str = j.value("confidence", "Inferred");
-            if (conf_str == "Verified") record.confidence = Confidence::Verified;
-            else if (conf_str == "Stale") record.confidence = Confidence::Stale;
-            else if (conf_str == "Conflicted") record.confidence = Confidence::Conflicted;
-            else record.confidence = Confidence::Inferred;
+            if (conf_str == "Verified") record.confidence_level = Confidence::Verified;
+            else if (conf_str == "Stale") record.confidence_level = Confidence::Stale;
+            else if (conf_str == "Conflicted") record.confidence_level = Confidence::Conflicted;
+            else record.confidence_level = Confidence::Inferred;
 
             // Parse embedding
             if (j.contains("embedding") && j["embedding"].is_array()) {

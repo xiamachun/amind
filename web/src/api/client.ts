@@ -30,6 +30,7 @@ export interface Memory {
   confidence: string; importance: number; created_at: number
   last_accessed: number; access_count: number; version: number
   has_embedding: boolean
+  layer?: 'Raw' | 'Derived'
   metadata?: Record<string, string>
 }
 
@@ -38,7 +39,12 @@ export interface MemoryListResponse {
 }
 
 export interface GraphEdge {
-  from_id: string; to_id: string; type: string; weight: number; created_at: number
+  from_id: string; to_id: string; type: string; weight: number; created_at?: number
+  // Populated by /v1/graph/neighbors/{id} so the UI can render neighbor
+  // phase + content preview without N+1 lookups.
+  other_phase?: string
+  other_confidence?: string
+  other_preview?: string
 }
 
 export interface EdgeListResponse {
@@ -57,100 +63,9 @@ export interface ConflictInfo {
 
 export interface HealthResponse { status: string; version: string }
 
-export interface GateLogEntry {
-  entry_id: string
-  timestamp_ms: number
-  namespace: string
-  content: string
-  decision: 'Accepted' | 'Rejected' | 'Deferred'
-  reason: string
-  marginal_value: number
-  conflict_with_id: string
-  owner: string
-  layer: 'Raw' | 'Derived'
-  user_metadata?: Record<string, string>
-  memory_id?: string
-  resurrected_to: string
-  resurrected_at_ms: number
-  resurrect_strategy?: string
-}
-
-export interface GateLogStats {
-  accepted: number; rejected: number; deferred: number
-  resurrected: number; total: number
-}
-
-export interface GateLogResponse {
-  entries: GateLogEntry[]
-  stats: GateLogStats
-  memory_size: number
-}
-
-export interface ResurrectResponse {
-  memory_id: string
-  strategy: string
-  replaced_id?: string
-  note?: string
-}
-
-export interface ForgetLogEntry {
-  timestamp_ms: number
-  memory_id: string
-  decision: 'Decay' | 'Archive' | 'Tombstone' | 'Vacuum'
-            | 'DropFromHNSW' | 'ResolveConflict' | 'LineageInvalidate'
-            | 'GateReject' | 'GateDefer'
-  reason: string
-  before_state: string
-  after_state: string
-  lineage_affected?: string[]
-  gc_worker_id?: string
-  namespace?: string
-  content?: string
-}
-
-export interface ForgetLogStats {
-  decay: number; archive: number; tombstone: number; vacuum: number
-  other: number; total: number
-}
-
-export interface ForgetLogConfig {
-  enabled: boolean
-  shadow_mode: boolean
-  decay_threshold: number
-  archive_threshold: number
-  tombstone_threshold: number
-  gc_interval_seconds: number
-  sample_ratio: number
-}
-
-export interface ForgetLogResponse {
-  entries: ForgetLogEntry[]
-  stats: ForgetLogStats
-  config: ForgetLogConfig
-  memory_size: number
-}
-
-export interface RecallStaleLogEntry {
-  timestamp_ms: number
-  query: string
-  namespace: string
-  aggregate_id: string
-  aggregate_preview: string
-  aggregate_created_at: number
-  witness_in_aggregate: string[]
-  witness_in_newer: string[]
-  newer_fact_ids: string[]
-  action: 'Filter' | 'Downweight'
-  pre_score: number
-  post_score: number
-}
-
-export interface RecallStaleLogResponse {
-  enabled: boolean
-  entries: RecallStaleLogEntry[]
-  memory_size: number
-  stats: { total: number }
-}
+// GateLogEntry / ForgetLogEntry / RecallStaleLogEntry / ReconcileLogEntry
+// and their response types removed in Phase 4 — superseded by MemoryEventEntry
+// + EventsQueryResponse / MemoryTraceResponse / TraceResponse below.
 
 export const api = {
   health:    () => fetchApi<HealthResponse>('/v1/health'),
@@ -158,9 +73,17 @@ export const api = {
   coverage:  () => fetchApi<CoverageStats>('/v1/metacognition/coverage'),
   conflicts: () => fetchApi<ConflictInfo[]>('/v1/metacognition/conflicts'),
 
-  listMemories: (page = 1, perPage = 50, owner = '', phase = '', q = '', namespace = '', userId = '') =>
-    fetchApi<MemoryListResponse>(
-      `/v1/memories/list?page=${page}&per_page=${perPage}&owner=${owner}&phase=${phase}&q=${encodeURIComponent(q)}&namespace=${encodeURIComponent(namespace)}&user_id=${encodeURIComponent(userId)}`),
+  listMemories: (page = 1, perPage = 50, owner = '', phase = '', q = '',
+                  agent_id = '', userId = '', layer = '',
+                  includeTombstone = false) => {
+    const params = new URLSearchParams({
+      page: String(page), per_page: String(perPage),
+      owner, phase, q, agent_id, user_id: userId,
+    })
+    if (layer) params.set('layer', layer)
+    if (includeTombstone) params.set('include_tombstone', '1')
+    return fetchApi<MemoryListResponse>(`/v1/memories/list?${params.toString()}`)
+  },
 
   getMemory:  (id: string) => fetchApi<Memory>(`/v1/memories/${id}`),
   getHistory: (id: string) => fetchApi<Memory[]>(`/v1/memories/${id}/history`),
@@ -170,15 +93,17 @@ export const api = {
   listEdges: (page = 1, perPage = 500) =>
     fetchApi<EdgeListResponse>(`/v1/graph/edges?page=${page}&per_page=${perPage}`),
   getNeighbors: (id: string) => fetchApi<GraphEdge[]>(`/v1/graph/neighbors/${id}`),
+  getNeighborsIncoming: (id: string) =>
+    fetchApi<GraphEdge[]>(`/v1/graph/neighbors/${id}?include_incoming=1`),
 
   listSessions: () => fetchApi<SessionSummary[]>('/v1/sessions/list'),
   sessionSummary: (id: string) => fetchApi<SessionSummary>(`/v1/sessions/${id}/summary`),
 
-  storeMemory: (content: string, owner = 'user', agent_id = 'default') =>
+  storeMemory: (content: string, scope = 'private', agent_id = 'default') =>
     fetchApi<{ memory_ids: string[]; async_refinement_scheduled: boolean }>(
       '/v1/memories', {
         method: 'POST',
-        body: JSON.stringify({ content, owner, agent_id }),
+        body: JSON.stringify({ content, scope, agent_id }),
       }),
 
   backupExport: (type = 'memories') => fetchApi<string>(`/v1/backup/export?type=${type}`),
@@ -197,47 +122,9 @@ export const api = {
   reloadConfig: () =>
     fetchApi<{ ok: boolean; changed: number }>('/v1/config/reload', { method: 'POST' }),
 
-  // --- Pipeline observability ---
-  pipelineStats: () => fetchApi<PipelineStats>('/v1/pipeline/stats'),
-  reconcileLog: (limit = 100) =>
-    fetchApi<ReconcileLogResponse>(`/v1/pipeline/reconcile-log?limit=${limit}`),
-
-  // --- Gate Log (audit + resurrect) ---
-  gateLog: (params: {
-    limit?: number; decision?: string; namespace?: string;
-    sinceMs?: number; onlyUnresurrected?: boolean
-  } = {}) => {
-    const q = new URLSearchParams()
-    q.set('limit', String(params.limit ?? 200))
-    if (params.decision) q.set('decision', params.decision)
-    if (params.namespace) q.set('namespace', params.namespace)
-    if (params.sinceMs) q.set('since_ms', String(params.sinceMs))
-    if (params.onlyUnresurrected) q.set('only_unresurrected', '1')
-    return fetchApi<GateLogResponse>(`/v1/gate/log?${q.toString()}`)
-  },
-
-  gateResurrect: (entryId: string,
-                   strategy: 'coexist' | 'replace_conflict' | 'update_existing' = 'coexist') =>
-    fetchApi<ResurrectResponse>(`/v1/gate/log/${entryId}/resurrect`, {
-      method: 'POST',
-      body: JSON.stringify({ strategy }),
-    }),
-
-  // --- Forget Log (audit) ---
-  forgetLog: (params: { limit?: number; decision?: string } = {}) => {
-    const q = new URLSearchParams()
-    q.set('limit', String(params.limit ?? 200))
-    if (params.decision) q.set('decision', params.decision)
-    return fetchApi<ForgetLogResponse>(`/v1/forget/log?${q.toString()}`)
-  },
-
-  // --- Recall stale-log (aggregate staleness filter audit) ---
-  recallStaleLog: (params: { limit?: number; namespace?: string } = {}) => {
-    const q = new URLSearchParams()
-    q.set('limit', String(params.limit ?? 200))
-    if (params.namespace) q.set('namespace', params.namespace)
-    return fetchApi<RecallStaleLogResponse>(`/v1/recall/stale-log?${q.toString()}`)
-  },
+  // Pipeline/Gate/Forget/Stale legacy API removed in Phase 4.
+  // All observability now goes through api.events() / api.memoryTrace() /
+  // api.traceById() / api.eventsStats() / api.resurrectEvent() defined below.
 
   // --- Auth Key Management ---
   createApiKey: (label: string) =>
@@ -248,6 +135,120 @@ export const api = {
   listApiKeys: () => fetchApi<ApiKeyListResponse>('/v1/auth/keys'),
   revokeApiKey: (keyId: string) =>
     fetchApi<{ status: string }>(`/v1/auth/keys/${keyId}`, { method: 'DELETE' }),
+
+  // --- Unified Memory Event Log (Phase 3) ---
+  events: (params: {
+    limit?: number
+    kind?: EventKind | ''
+    status?: EventStatus | ''
+    memoryId?: string
+    traceId?: string
+    agent_id?: string
+    sinceMs?: number
+    untilMs?: number
+  } = {}) => {
+    const q = new URLSearchParams()
+    q.set('limit', String(params.limit ?? 200))
+    if (params.kind)      q.set('kind', params.kind)
+    if (params.status)    q.set('status', params.status)
+    if (params.memoryId)  q.set('memory_id', params.memoryId)
+    if (params.traceId)   q.set('trace_id', params.traceId)
+    if (params.agent_id)  q.set('agent_id', params.agent_id)
+    if (params.sinceMs)   q.set('since_ms', String(params.sinceMs))
+    if (params.untilMs)   q.set('until_ms', String(params.untilMs))
+    return fetchApi<EventsQueryResponse>(`/v1/events?${q.toString()}`)
+  },
+  eventsStats: (params: {
+    agent_id?: string
+    memoryId?: string
+    traceId?: string
+    status?: EventStatus | ''
+    sinceMs?: number
+    untilMs?: number
+  } = {}) => {
+    // Intentionally excludes `kind` — if the page is filtered to a single kind,
+    // we still want the other kind cards populated so they remain clickable as
+    // "switch to this kind within the current scope".
+    const q = new URLSearchParams()
+    if (params.agent_id)  q.set('agent_id', params.agent_id)
+    if (params.memoryId)  q.set('memory_id', params.memoryId)
+    if (params.traceId)   q.set('trace_id', params.traceId)
+    if (params.status)    q.set('status', params.status)
+    if (params.sinceMs)   q.set('since_ms', String(params.sinceMs))
+    if (params.untilMs)   q.set('until_ms', String(params.untilMs))
+    return fetchApi<EventsStatsResponse>(`/v1/events/stats?${q.toString()}`)
+  },
+  memoryTrace: (id: string) =>
+    fetchApi<MemoryTraceResponse>(`/v1/memories/${id}/trace`),
+  traceById: (traceId: string) =>
+    fetchApi<TraceResponse>(`/v1/traces/${traceId}`),
+  resurrectEvent: (eventId: string,
+                    body: { content?: string; strategy?: string } = {}) =>
+    fetchApi<{ memory_id: string; source_event_id: string; strategy: string }>(
+      `/v1/admin/resurrect/${eventId}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+}
+
+// ── Unified observability types ────────────────────────────────────────────
+
+export type EventKind =
+  | 'Store' | 'Embed' | 'Gate' | 'Derive' | 'Reconcile'
+  | 'LineagePropagate' | 'GraphEdge' | 'VersionUpdate'
+  | 'Recall' | 'RecallSemantic' | 'RecallFilter' | 'RecallStale'
+  | 'GcDecay' | 'GcArchive' | 'GcTombstone' | 'GcVacuum'
+  | 'Consolidate' | 'Resurrect'
+  | 'ProviderCall' | 'Error'
+
+export type EventStatus = 'Ok' | 'Rejected' | 'Deferred' | 'Failed' | 'NoOp'
+
+export interface MemoryEventEntry {
+  event_id: string
+  parent_event_id: string
+  trace_id: string
+  memory_id: string
+  timestamp_ms: number
+  duration_ms: number
+  agent_id: string
+  kind: EventKind
+  status: EventStatus
+  summary: string
+  attrs?: Record<string, string>
+}
+
+export interface EventsQueryResponse {
+  entries: MemoryEventEntry[]
+  memory_size: number
+}
+
+export interface EventsStatsResponse {
+  by_kind: Record<string, number>
+  by_status: Record<string, number>
+  total: number
+  memory_size: number
+}
+
+export interface TraceGroup {
+  trace_id: string
+  events: MemoryEventEntry[]
+  event_count: number
+  start_ms: number
+  end_ms: number
+}
+
+export interface MemoryTraceResponse {
+  memory_id: string
+  total_events: number
+  traces: TraceGroup[]
+}
+
+export interface TraceResponse {
+  trace_id: string
+  event_count: number
+  start_ms: number
+  end_ms: number
+  events: MemoryEventEntry[]
 }
 
 export interface Variable {
@@ -260,36 +261,9 @@ export interface Variable {
   description: string
 }
 
-export interface PipelineStats {
-  queue_depth: number
-  queue_capacity: number
-  executor_threads: number
-  tasks_completed: number
-  tasks_failed: number
-  reconciler: {
-    total_calls: number
-    llm_invocations: number
-    llm_failures: number
-    op_add: number
-    op_replace: number
-    op_retract: number
-    op_reinforce: number
-    op_noop: number
-  }
-}
-
-export interface ReconcileLogEntry {
-  timestamp_ms: number
-  candidate: string
-  op: string
-  target_id: string
-  latency_ms: number
-  from_fallback: boolean
-}
-
-export interface ReconcileLogResponse {
-  entries: ReconcileLogEntry[]
-}
+// PipelineStats / ReconcileLogEntry / ReconcileLogResponse types removed in
+// Phase 4. Reconciler decisions now flow as MemoryEvent{kind=Reconcile}
+// queryable via /v1/events?kind=Reconcile.
 
 export interface ApiKeyInfo {
   id: string

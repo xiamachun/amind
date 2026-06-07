@@ -284,13 +284,13 @@ curl http://localhost:8080/v1/health
 curl -X POST http://localhost:8080/v1/memories \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"agent_id":"agent-1","owner":"user","content":"用户偏好暗色主题","importance":0.8}'
+  -d '{"agent_id":"agent-1","user_id":"user-1","scope":"private","memory_type":"preference","content":"用户偏好暗色主题","importance":0.8}'
 
 # 检索记忆
 curl -X POST http://localhost:8080/v1/memories/recall \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"agent_id":"agent-1","query":"用户的界面偏好是什么？","top_k":5}'
+  -d '{"agent_id":"agent-1","user_id":"user-1","scope":"private","memory_type":"preference","query":"用户的界面偏好是什么？","top_k":5}'
 
 # 查看版本历史
 curl -H "Authorization: Bearer $TOKEN" \
@@ -300,6 +300,15 @@ curl -H "Authorization: Bearer $TOKEN" \
 curl -H "Authorization: Bearer $TOKEN" \
   http://localhost:8080/v1/metacognition/conflicts?agent_id=agent-1
 ```
+
+#### API 参数迁移指南
+
+| 旧参数 | 新参数 | 说明 |
+|--------|--------|------|
+| `namespace` | `agent_id` + `user_id` | 实现多用户多 Agent 物理隔离。`agent_id` 标识 Agent，`user_id` 标识用户 |
+| `owner` (user/agent/system) | `scope` + `memory_type` | `scope`: `private`（私有）或 `agent_shared`（Agent 共享）；`memory_type`: `preference`/`fact`/`domain_knowledge`/`procedure`/`episodic`/`ephemeral` |
+
+> 详见 [CHANGELOG](docs/CHANGELOG.md) 了解完整的变更历史。
 
 <details>
 <summary>完整 API 列表</summary>

@@ -25,16 +25,17 @@ export default function Memories() {
   const owner = searchParams.get('owner') || ''
   const phase = searchParams.get('phase') || ''
   const q = searchParams.get('q') || ''
-  const namespace = searchParams.get('namespace') || ''
+  const agent_id = searchParams.get('agent_id') || ''
   const userId = searchParams.get('user_id') || ''
+  const layer = searchParams.get('layer') || ''   // '' | 'Raw' | 'Derived'
 
   const loadMemories = useCallback(() => {
     setLoading(true)
-    api.listMemories(page, perPage, owner, phase, q, namespace, userId)
+    api.listMemories(page, perPage, owner, phase, q, agent_id, userId, layer)
       .then(r => { setMemories(r.memories || []); setTotal(r.total) })
       .catch(() => {})
       .finally(() => setLoading(false))
-  }, [page, owner, phase, q, namespace, userId])
+  }, [page, owner, phase, q, agent_id, userId, layer])
 
   useEffect(() => { loadMemories() }, [loadMemories])
 
@@ -124,13 +125,12 @@ export default function Memories() {
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200
                        focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-y" />
           <div className="flex items-center gap-3">
-            <label className="text-xs text-gray-500">Owner:</label>
+            <label className="text-xs text-gray-500">Scope:</label>
             <select value={newOwner} onChange={e => setNewOwner(e.target.value)}
               className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200">
-              <option value="user">User</option>
-              <option value="project">Project</option>
-              <option value="agent">Agent</option>
-              <option value="session">Session</option>
+              <option value="private">Private</option>
+              <option value="agent_shared">Agent Shared</option>
+              <option value="system">System</option>
             </select>
             <button onClick={handleStore} disabled={storing || !newContent.trim()}
               className="px-4 py-1.5 rounded-lg text-sm bg-indigo-600 text-white hover:bg-indigo-500
@@ -146,6 +146,28 @@ export default function Memories() {
         </div>
       )}
 
+      {/* Layer tabs — Raw is what the user said, Derived is what amind
+          extracted as facts. They behave very differently downstream so it's
+          useful to see them separately. */}
+      <div className="flex items-center gap-1 bg-gray-900 border border-gray-800 rounded-lg p-1 w-fit">
+        {[
+          { val: '',        label: 'All',     hint: 'Both raw memories and derived facts' },
+          { val: 'Raw',     label: 'Raw',     hint: 'Original user messages — the evidence layer' },
+          { val: 'Derived', label: 'Derived', hint: 'Facts extracted from raw — what recall actually uses' },
+        ].map(t => (
+          <button key={t.val}
+                  onClick={() => updateFilter('layer', t.val)}
+                  title={t.hint}
+                  className={`px-3 py-1 rounded text-xs transition-colors ${
+                    layer === t.val
+                      ? 'bg-indigo-700 text-white'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
+                  }`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       {/* Filters */}
       <div className="flex flex-wrap gap-3 items-center">
         <input type="text" placeholder="Search content..."
@@ -155,7 +177,7 @@ export default function Memories() {
                      focus:outline-none focus:ring-2 focus:ring-indigo-500" />
         <select value={owner} onChange={e => updateFilter('owner', e.target.value)}
           className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200">
-          <option value="">All Owners</option>
+          <option value="">All Scopes</option>
           {['User','Project','Agent','Session','Shared'].map(o =>
             <option key={o} value={o}>{o}</option>)}
         </select>
@@ -170,9 +192,9 @@ export default function Memories() {
           onKeyDown={e => e.key === 'Enter' && updateFilter('user_id', (e.target as HTMLInputElement).value)}
           className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 w-40
                      focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-        <input type="text" placeholder="Namespace..."
-          defaultValue={namespace}
-          onKeyDown={e => e.key === 'Enter' && updateFilter('namespace', (e.target as HTMLInputElement).value)}
+        <input type="text" placeholder="agent_id..."
+          defaultValue={agent_id}
+          onKeyDown={e => e.key === 'Enter' && updateFilter('agent_id', (e.target as HTMLInputElement).value)}
           className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 w-36
                      focus:outline-none focus:ring-2 focus:ring-indigo-500" />
         <button onClick={loadMemories} title="Refresh"
@@ -215,7 +237,8 @@ export default function Memories() {
               </th>
               <th className="text-left px-4 py-3">Content</th>
               <th className="text-left px-4 py-3 w-32">User / Session</th>
-              <th className="text-left px-4 py-3 w-24">Owner</th>
+              <th className="text-left px-4 py-3 w-20">Layer</th>
+              <th className="text-left px-4 py-3 w-24">Scope</th>
               <th className="text-left px-4 py-3 w-24">Phase</th>
               <th className="text-left px-4 py-3 w-20">Score</th>
               <th className="text-left px-4 py-3 w-36">Created</th>
@@ -223,9 +246,9 @@ export default function Memories() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
             ) : memories.length === 0 ? (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500">No memories found</td></tr>
+              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-500">No memories found</td></tr>
             ) : memories.map(m => {
               const meta = m.metadata || {}
               const userTag = meta.user_id || meta.session_id || ''
@@ -254,6 +277,19 @@ export default function Memories() {
                   ) : (
                     <span className="text-gray-600">—</span>
                   )}
+                </td>
+                <td className="px-4 py-3">
+                  {m.layer === 'Derived' ? (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-violet-900/40 text-violet-300"
+                          title="Fact extracted by Stage 2 — what recall actually surfaces">
+                      Derived
+                    </span>
+                  ) : m.layer === 'Raw' ? (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-400"
+                          title="Original user message — the evidence layer">
+                      Raw
+                    </span>
+                  ) : <span className="text-xs text-gray-600">—</span>}
                 </td>
                 <td className="px-4 py-3">
                   <span className={`text-xs px-2 py-0.5 rounded-full ${ownerColors[m.owner] || 'bg-gray-800 text-gray-400'}`}>

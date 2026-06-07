@@ -10,7 +10,8 @@ DerivedExtractor::DerivedExtractor(WriteGate& gate, LineageIndex& lineage)
 
 std::vector<DerivedResult> DerivedExtractor::processFacts(
     uint64_t raw_memory_id,
-    const std::string& namespace_,
+    const std::string& agent_id,
+    const std::string& user_id,
     const std::vector<DerivedCandidate>& candidates,
     const SimilaritySearchFunc& search_func,
     const StoreFunc& store_func) {
@@ -57,16 +58,17 @@ std::vector<DerivedResult> DerivedExtractor::processFacts(
             // restatement" — exactly the case where Reconciler is most useful.
             MemoryRecord derived;
             derived.content = candidate.content;
-            derived.namespace_hash = MemoryRecord::hashNamespace(namespace_);
-            // Inherit owner from the raw memory: a fact derived from a
-            // User-owned utterance is still about the user, not the AI itself.
-            derived.owner = candidate.owner;
+            derived.agent_id = agent_id;
+            derived.user_id = user_id;
+            derived.scope = candidate.scope;
+            derived.memory_type = candidate.memory_type;
+            derived.tier = MemoryTier::Consolidated; // Derived facts are consolidated
             derived.layer = MemoryLayer::Derived;
             derived.source_tier = candidate.source_tier;
             derived.importance = candidate.importance;
-            derived.confidence = (verdict.decision == GateDecision::Deferred)
-                                 ? Confidence::Stale       // lower confidence for Deferred
-                                 : Confidence::Inferred;
+            derived.confidence_level = (verdict.decision == GateDecision::Deferred)
+                                       ? Confidence::Stale       // lower confidence for Deferred
+                                       : Confidence::Inferred;
             derived.gate_decision = verdict.decision;
             derived.marginal_value = verdict.marginal_value;
             derived.parent_id = raw_memory_id;

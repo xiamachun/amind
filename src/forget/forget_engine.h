@@ -12,9 +12,13 @@
 
 namespace amind {
 
-class ForgetLog;
+// ForgetLog class removed in Phase 4 (replaced by observability::MemoryEventLog).
+// ForgetLogEntry struct kept because runForgetCycleOnce() still uses its
+// Decision enum + decisionToString() helper to label emitted MemoryEvents.
 
-/// A single entry in the ForgetLog — records why a GC decision was made.
+/// Decision record retained as a value type — no longer persisted to its own
+/// log file. The amind engine builds a MemoryEvent{kind=GcDecay|Archive|Tombstone}
+/// from each instance and writes it to the unified events.log.
 struct ForgetLogEntry {
     uint64_t timestamp_ms;
     uint64_t memory_id;
@@ -35,7 +39,7 @@ struct ForgetLogEntry {
     std::vector<uint64_t> lineage_affected;
     std::string gc_worker_id;
     // Display-only context (filled by the writer); truncated for storage.
-    std::string namespace_;
+    std::string agent_id;
     std::string content_preview;
 };
 
@@ -106,9 +110,6 @@ class ForgetEngine {
 public:
     explicit ForgetEngine(ForgetConfig config = {});
 
-    /// Construct with persistent log directory.
-    ForgetEngine(ForgetConfig config, const std::string& data_dir);
-
     ~ForgetEngine();
 
     /// Compute forget_score for a single memory given its signals.
@@ -121,23 +122,6 @@ public:
     /// Returns evaluations sorted by forget_score descending.
     std::vector<GcEvaluation> runCycle(const std::vector<std::pair<uint64_t, ForgetSignals>>& batch) const;
 
-    // ── ForgetLog ────────────────────────────────────────────────────────
-
-    /// Append an entry to the in-memory forget log.
-    void logEntry(ForgetLogEntry entry);
-
-    /// Get all log entries (for testing/debugging).
-    std::vector<ForgetLogEntry> getLog() const;
-
-    /// Recent entries (bounded). Reads from the persistent log's in-memory
-    /// ring (if open), otherwise falls back to the last `limit` of `log_`.
-    std::vector<ForgetLogEntry> recentEntries(size_t limit = 1000) const;
-
-    /// Clear the log.
-    void clearLog();
-
-    size_t logSize() const;
-
     // ── Config ───────────────────────────────────────────────────────────
 
     void setShadowMode(bool enabled);
@@ -147,8 +131,8 @@ public:
 private:
     mutable std::mutex mutex_;
     ForgetConfig config_;
-    std::vector<ForgetLogEntry> log_;
-    std::unique_ptr<ForgetLog> persistent_log_;
+    // Phase 4: in-memory log_ and persistent_log_ removed. Engine emits
+    // MemoryEvents directly to events_log_ instead.
 };
 
 }  // namespace amind

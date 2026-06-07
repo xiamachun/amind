@@ -15,7 +15,8 @@ namespace amind {
 struct ProposedMemory {
     std::string content;
     std::vector<float> embedding;
-    MemoryOwner owner{MemoryOwner::Session};
+    MemoryScope scope{MemoryScope::Private};
+    MemoryType memory_type{MemoryType::Ephemeral};
     SourceTier source_tier{SourceTier::Inference};
     float importance{0.5f};
 };

@@ -11,42 +11,10 @@
 
 namespace amind {
 
-/// One audit entry for a single filter decision.
-struct StaleFilterEvent {
-    uint64_t timestamp_ms{0};
-    std::string query;
-    std::string namespace_;
-    uint64_t aggregate_id{0};
-    std::string aggregate_preview;     // truncated content of the stale aggregate
-    uint32_t aggregate_created_at{0};  // unix seconds
-    std::vector<std::string> witness_ids_in_aggregate;
-    std::vector<std::string> witness_ids_in_newer_facts;
-    std::vector<uint64_t> newer_fact_ids;
-    enum class Action : uint8_t { Filter, Downweight };
-    Action action{Action::Filter};
-    float pre_score{0.0f};
-    float post_score{0.0f};
-};
+class MemoryEventLog;
 
-/// Persistent ring-buffer audit log (mirrors ForgetLog/GateLog patterns).
-class StaleLog {
-public:
-    explicit StaleLog(const std::string& data_dir, size_t ring = 1000);
-    ~StaleLog();
-
-    void open();
-    void replay();
-    void append(const StaleFilterEvent& ev);
-    std::vector<StaleFilterEvent> recentEntries() const;
-    size_t memorySize() const;
-
-private:
-    std::string data_dir_;
-    size_t ring_capacity_;
-    std::ofstream file_;
-    mutable std::mutex mutex_;
-    std::deque<StaleFilterEvent> recent_;
-};
+// StaleFilterEvent + StaleLog removed in Phase 4. AggregateStalenessFilter
+// now emits MemoryEvent{kind=RecallStale} into the unified MemoryEventLog.
 
 /// Detector + filter for "list-style aggregate" memories that have been
 /// rendered stale by newer atomic facts in the same recall result set.
@@ -86,7 +54,7 @@ public:
     size_t apply(std::vector<ScoredCandidate>& candidates,
                  const std::string& query,
                  const std::string& namespace_hint,
-                 StaleLog* log) const;
+                 MemoryEventLog* events) const;
 
     /// Public for unit tests: extract IDs from text using the built-in
     /// patterns. Returns map of pattern_name → set of matched IDs.

@@ -49,18 +49,10 @@ RemoveResult RemoveCoordinator::remove(uint64_t memory_id,
                 persist(invalidated_id, *descendant);
                 hnsw_delete(invalidated_id);
 
-                // Log to ForgetEngine
-                ForgetLogEntry entry;
-                entry.timestamp_ms = static_cast<uint64_t>(
-                    MemoryRecord::currentTimeSec()) * 1000;
-                entry.memory_id = invalidated_id;
-                entry.decision = ForgetLogEntry::Decision::LineageInvalidate;
-                entry.reason = "lineage orphan from parent " + std::to_string(memory_id);
-                entry.before_state = MemoryPhase::Active;
-                entry.after_state = MemoryPhase::Invalidated;
-                entry.lineage_affected = {memory_id};
-                entry.gc_worker_id = "remove_coordinator";
-                forget_engine_.logEntry(std::move(entry));
+                // TODO Phase 4 follow-up: emit MemoryEvent{kind=LineagePropagate}
+                // via an events_log_ injection here. For now the cascade still
+                // works correctly; only its observability event is missing.
+                (void)memory_id;
             }
         });
 
@@ -73,20 +65,10 @@ RemoveResult RemoveCoordinator::remove(uint64_t memory_id,
         }
     }
 
-    // Step 6: Log the primary remove
-    ForgetLogEntry primary_entry;
-    primary_entry.timestamp_ms = static_cast<uint64_t>(
-        MemoryRecord::currentTimeSec()) * 1000;
-    primary_entry.memory_id = memory_id;
-    primary_entry.decision = (reason == RemoveReason::GcTombstone)
-        ? ForgetLogEntry::Decision::Tombstone
-        : ForgetLogEntry::Decision::Tombstone;
-    primary_entry.reason = "remove(reason=" + removeReasonToString(reason) + ")";
-    primary_entry.before_state = before_state;
-    primary_entry.after_state = MemoryPhase::Tombstone;
-    primary_entry.lineage_affected = result.invalidated_descendants;
-    primary_entry.gc_worker_id = "remove_coordinator";
-    forget_engine_.logEntry(std::move(primary_entry));
+    // Step 6: Log the primary remove — TODO Phase 4 follow-up: emit
+    // MemoryEvent{kind=GcTombstone} via events_log_ injection here.
+    (void)before_state;
+    (void)reason;
 
     // Step 7: Update stats
     {

@@ -27,7 +27,10 @@ class StoreResponse(BaseModel):
 class Memory(BaseModel):
     memory_id: int | str = 0
     content: str = ""
-    owner: str = ""
+    agent_id: str = ""
+    user_id: str = ""
+    scope: str = ""
+    memory_type: str = ""
     phase: str = ""
     confidence: str = ""
     importance: float = 0.0
@@ -43,7 +46,10 @@ class Memory(BaseModel):
 class ScoredMemory(BaseModel):
     memory_id: int | str = 0
     content: str = ""
-    owner: str = ""
+    agent_id: str = ""
+    user_id: str = ""
+    scope: str = ""
+    memory_type: str = ""
     phase: str = ""
     confidence: str = ""
     score: float = 0.0
@@ -87,7 +93,8 @@ class TurnResponse(BaseModel):
 
 class SessionSummary(BaseModel):
     session_id: int | str = 0
-    namespace: str = ""
+    agent_id: str = ""
+    user_id: str = ""
     turn_count: int = 0
     current_intent: str = ""
     memory_count: int = 0
@@ -110,7 +117,9 @@ class CoverageStats(BaseModel):
     stale: int = 0
     conflicted: int = 0
     last_updated: int = 0
-    owner_distribution: dict[str, int] = Field(default_factory=dict)
+    agent_id_distribution: dict[str, int] = Field(default_factory=dict)
+    scope_distribution: dict[str, int] = Field(default_factory=dict)
+    memory_type_distribution: dict[str, int] = Field(default_factory=dict)
     phase_distribution: dict[str, int] = Field(default_factory=dict)
     confidence_distribution: dict[str, int] = Field(default_factory=dict)
 
@@ -135,13 +144,15 @@ class SetVarResponse(BaseModel):
 class GateLogEntry(BaseModel):
     entry_id: str = ""
     timestamp_ms: int = 0
-    namespace: str = ""
+    agent_id: str = ""
+    user_id: str = ""
     content: str = ""
     decision: str = ""           # "Accepted" / "Rejected" / "Deferred"
     reason: str = ""
     marginal_value: float = 0.0
     conflict_with_id: str = "0"
-    owner: str = ""
+    scope: str = ""
+    memory_type: str = ""
     layer: str = "Raw"           # "Raw" / "Derived"
     user_metadata: dict = Field(default_factory=dict)
     memory_id: str = "0"

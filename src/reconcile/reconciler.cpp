@@ -46,30 +46,71 @@ whether it conflicts with EXISTING facts and pick ONE operation:
                → do NOT store new (duplicate), bump importance of the existing
   NOOP       — new fact is fully covered already; skip silently
 
-CRITICAL RULES — apply these first:
-  1. If existing says "X的Y是A" and new says "X的Y是B" with the SAME X and Y,
-     pick REPLACE. Examples:
-       existing "用户家的狗叫旺财"   new "用户家的狗叫小白"     → REPLACE
-       existing "用户喜欢迪丽热巴"   new "用户喜欢古力娜扎"      → REPLACE
-       existing "猫3岁"            new "猫5岁"                → REPLACE
-  2. PREFERENCE properties — "favorite/most-liked/best X" is ONE property per
-     person. A new favorite/preference value REPLACES the old one even when
-     the specific values look unrelated. Examples:
-       existing "用户最喜欢的餐厅是海底捞"  new "用户喜欢大董烤鸭,几乎每周都去" → REPLACE
-       existing "用户喜欢喝可乐"           new "用户最爱喝果汁"               → REPLACE
-       existing "用户最爱的电影是星战"       new "用户最爱的电影是头号玩家"      → REPLACE
-     The brand/cuisine looking "different" is the WHOLE POINT of a preference
-     update — that's a value change on the same preference slot.
-  3. BINDING/ASSOCIATION facts about an OLD value should be RETRACT when the
-     anchor value gets superseded. Examples:
-       existing "用户的银行卡绑定138号码"  new "用户的138号码已注销"  → RETRACT
-       existing "用户用138注册微信"        new "用户的138号码已注销"  → RETRACT
-  4. If new contains a negation about an existing claim, pick RETRACT.
-     Examples:
-       existing "用户用 IntelliJ"    new "用户不再用 IntelliJ"  → RETRACT
-  5. Same statement worded differently → REINFORCE.
-  6. Don't choose ADD just because the surface form differs; check the
-     underlying claim. Default to ADD only when there is genuinely no overlap.
+CRITICAL RULES — apply these first. Examples are given bilingually so the
+rules generalize across languages — apply the SAME logic regardless of
+input language (English, Chinese, Spanish, Japanese, mixed-script, …).
+
+  1. SAME-SLOT VALUE CHANGE → REPLACE.
+     If existing says "X's Y is A" and new says "X's Y is B" with the SAME
+     entity X and same property Y, pick REPLACE.
+       existing "user's dog is named Wangcai"  new "user's dog is named Xiaobai"
+       existing "用户家的狗叫旺财"               new "用户家的狗叫小白"
+       existing "the cat is 3 years old"        new "the cat is 5 years old"
+       existing "猫3岁"                         new "猫5岁"
+       existing "user's phone is 13800138000"   new "user's phone is 15900159000"
+       → all REPLACE
+
+  2. PREFERENCE properties — "favorite / most-liked / best X" is ONE slot per
+     person. A new favorite value REPLACES the old one even if the values
+     look unrelated.
+       existing "user's favorite restaurant is Haidilao"
+                                          new "user loves Dadong roast duck, goes weekly"
+       existing "用户最喜欢的餐厅是海底捞"     new "用户喜欢大董烤鸭,几乎每周都去"
+       existing "user's favorite movie is Star Wars"
+                                          new "user's favorite movie is Ready Player One"
+       existing "user's favorite drink is Coke"  new "user prefers fruit juice now"
+       → all REPLACE
+     The values looking "different" is the WHOLE POINT of a preference update.
+
+  3. BINDING/ASSOCIATION about a SUPERSEDED anchor → RETRACT.
+       existing "user's bank card uses 138-phone"
+                                            new "user's 138-phone has been cancelled"
+       existing "用户的银行卡绑定138号码"        new "用户的138号码已注销"
+       → RETRACT (drop the bank-card binding, since 138 is gone)
+
+  4. NEGATION over an existing claim → RETRACT.
+       existing "user uses IntelliJ"     new "user no longer uses IntelliJ"
+       existing "用户用 IntelliJ"         new "用户不再用 IntelliJ"
+       existing "user is allergic to peanuts"  new "user is no longer allergic to peanuts"
+       existing "用户对花生过敏"            new "用户对花生不过敏"
+       → RETRACT
+     Negation cues across languages: "no", "not", "never", "no longer",
+     "stopped", "不", "没", "不再", "已注销", "ya no", "ne ... pas".
+
+  5. PARAPHRASE / SAME FACT → REINFORCE (do NOT add a duplicate copy).
+     If new and existing assert the SAME claim about the SAME entity/property
+     even with very different wording, it is a duplicate.
+       existing "user likes coffee"             new "user is a coffee lover"
+       existing "用户喜欢喝咖啡"                 new "用户是咖啡爱好者"
+       existing "user lives in Beijing"         new "user's current residence is Beijing"
+       existing "用户住在北京"                   new "用户现在的居住地是北京"
+       existing "user goes to the gym every Wednesday"
+                                          new "every Wednesday user works out at the gym"
+       existing "用户每周三去健身房"             new "用户每周三都会去健身房锻炼"
+       existing "user's daughter is named Xiaohong"
+                                          new "user has a daughter named Xiaohong"
+       existing "user is good at Python"        new "Python is user's strongest language"
+       existing "user's favorite is Dilraba"    new "Dilraba is user's idol"
+       existing "user is allergic to peanuts"   new "peanuts cause user to have allergies"
+       existing "user's annual salary is 800K"  new "user's yearly income is 800K"
+       → all REINFORCE
+     Heuristic: ask "do these two statements entail each other?" If yes →
+     REINFORCE. Different surface forms, equivalent meaning, same slot.
+
+  6. ADD is only correct when the new fact introduces information about a
+     DIFFERENT property or entity that no existing fact covers. Default to
+     REINFORCE / REPLACE / RETRACT before ADD whenever the new fact and an
+     existing fact share the same subject and the same property slot.
 
 Output STRICT JSON, nothing else, no markdown fences:
   {"op":"<OP>","target_id":<integer or 0>,"rationale":"<one short Chinese or English sentence>"}

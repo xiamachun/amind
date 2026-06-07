@@ -6,6 +6,9 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
 namespace amind {
@@ -164,30 +167,22 @@ Result<void, Error> Engine::init() {
         return makeError(Error::ConfigError, "failed to create Embed provider: " + embed_name);
     }
 
-    // Memory store
-    MemoryStore::Config store_config;
-    store_config.data_dir = config_.get("data_dir", "./amind_data");
-    store_config.embedding_dim = embed_dim;
-    store_config.conflict_similarity_threshold = config_.getFloat("conflict_similarity_threshold", 0.85f);
-    store_config.stale_threshold_hours = static_cast<uint32_t>(config_.getInt("stale_threshold_hours", 720));
-    store_config.decay_rate = config_.getFloat("decay_rate", 0.01f);
-    store_config.importance_boost = config_.getFloat("importance_boost", 0.1f);
-    store_config.hnsw_max_connections = static_cast<size_t>(config_.getInt("hnsw_max_connections", 16));
-    store_config.hnsw_ef_construction = static_cast<size_t>(config_.getInt("hnsw_ef_construction", 200));
-    store_config.hnsw_hot_capacity = static_cast<size_t>(config_.getInt("hot_capacity", 50000));
-    store_config.hnsw_cold_tier_path = config_.get("cold_tier_path", "");
-    store_config.hnsw_eviction_ratio = config_.getFloat("eviction_ratio", 0.1f);
-    store_config.hnsw_save_interval = static_cast<uint32_t>(config_.getInt("hnsw_save_interval", 60));
-    store_config.lsm_flush_interval = static_cast<uint32_t>(config_.getInt("lsm_flush_interval", 30));
-
-    memory_store_ = std::make_unique<MemoryStore>(store_config);
-    auto init_result = memory_store_->init();
-    if (!init_result.ok()) return init_result;
-
-    // Graph store
-    auto graph_data_dir = store_config.data_dir + "/graph";
-    graph_store_ = std::make_unique<GraphStore>(graph_data_dir);
-    graph_store_->recover();
+    // ── Agent stores (physical isolation per agent) ──
+    agents_meta_path_ = config_.get("data_dir", "./amind_data") + "/meta/agents.json";
+    loadAgentsMeta();
+    if (agent_stores_.empty()) {
+        auto store = std::make_unique<AgentStore>();
+        store->agent_id = "default";
+        store->display_name = "Default Agent";
+        store->domain = "general";
+        agent_stores_["default"] = std::move(store);
+    }
+    // Initialize each agent store
+    for (auto& [id, store] : agent_stores_) {
+        auto agent_init = initAgentStore(*store);
+        if (!agent_init.ok()) return agent_init;
+    }
+    saveAgentsMeta();
 
     // Async pipeline
     auto queue_capacity = static_cast<size_t>(config_.getInt("async_queue_capacity", 10000));
@@ -227,36 +222,28 @@ Result<void, Error> Engine::init() {
     write_gate_ = std::make_unique<WriteGate>(gate_cfg);
 
     // GateLog (audit + resurrect store; no TTL — keeps all rotated WAL forever)
+    // ── Unified MemoryEventLog (single source of truth for observability) ──
+    // Replaces GateLog / ForgetLog / StaleLog / Reconciler ring (see
+    // docs/arch/统一可观测层重构-MemoryEvent.md). Subsystems below emit
+    // MemoryEvents into events_log_ instead of their own files.
     {
-        GateLogConfig glog_cfg;
-        glog_cfg.max_file_bytes = static_cast<size_t>(
-            config_.getInt("gate_log_max_file_bytes", 100 * 1024 * 1024));
-        glog_cfg.max_memory_entries = static_cast<size_t>(
-            config_.getInt("gate_log_max_memory_entries", 1000));
-        gate_log_ = std::make_unique<GateLog>(
-            config_.get("data_dir", "./amind_data"), glog_cfg);
-        if (!gate_log_->open()) {
-            spdlog::warn("GateLog: failed to open WAL; in-memory only");
+        MemoryEventLogConfig el_cfg;
+        el_cfg.ring_capacity     = static_cast<size_t>(
+            config_.getInt("events_ring_capacity", 2000));
+        el_cfg.max_file_bytes    = static_cast<size_t>(
+            config_.getInt("events_max_file_bytes", 16 * 1024 * 1024));
+        el_cfg.max_rotated_files = static_cast<size_t>(
+            config_.getInt("events_max_rotated_files", 5));
+        events_log_ = std::make_unique<MemoryEventLog>(
+            config_.get("data_dir", "./amind_data"), el_cfg);
+        if (!events_log_->open()) {
+            spdlog::warn("MemoryEventLog: failed to open events.log");
         } else {
-            gate_log_->replay();
-        }
-
-        // Backfill namespace_hash → string reverse map from gate_log so the
-        // Forget Log can render namespaces for memories written before this
-        // process started.
-        if (gate_log_) {
-            GateLog::Filter f;
-            f.limit = 5000;  // recent ring is enough; capture path keeps it warm
-            for (const auto& entry : gate_log_->query(f)) {
-                if (!entry.namespace_.empty()) {
-                    memory_store_->registerNamespaceString(entry.namespace_);
-                }
-            }
+            events_log_->replay();
         }
     }
 
-    // LineageIndex
-    lineage_index_ = std::make_unique<LineageIndex>();
+    // LineageIndex is now per-agent, initialized in initAgentStore()
 
     // ForgetEngine
     ForgetConfig forget_cfg;
@@ -266,11 +253,9 @@ Result<void, Error> Engine::init() {
     forget_cfg.gc_interval_seconds = static_cast<uint32_t>(config_.getInt("v2_forget_gc_interval", 3600));
     forget_cfg.sample_ratio        = config_.getFloat("v2_forget_sample_ratio", 0.10f);
     forget_cfg.shadow_mode         = v2_cfg.global_shadow_mode;
-    // Use the data_dir overload so the persistent ForgetLog (forget.log JSONL,
-    // 10MB rotation x5) is opened — this is what the /v1/forget/log endpoint
-    // and the WebUI ForgetLog page read from.
-    forget_engine_ = std::make_unique<ForgetEngine>(
-        forget_cfg, store_config.data_dir);
+    // Phase 4: ForgetEngine no longer owns its own log; GC decisions go to
+    // events_log_ instead. data_dir parameter dropped.
+    forget_engine_ = std::make_unique<ForgetEngine>(forget_cfg);
 
     // ConflictResolver
     ConflictResolverConfig conflict_cfg;
@@ -278,7 +263,7 @@ Result<void, Error> Engine::init() {
     conflict_resolver_ = std::make_unique<ConflictResolver>(conflict_cfg);
 
     // RemoveCoordinator (depends on lineage + forget)
-    remove_coordinator_ = std::make_unique<RemoveCoordinator>(*lineage_index_, *forget_engine_);
+    remove_coordinator_ = std::make_unique<RemoveCoordinator>(lineageIndex(), *forget_engine_);
 
     // ConsolidationWorker
     ConsolidationConfig consol_cfg;
@@ -289,7 +274,7 @@ Result<void, Error> Engine::init() {
     consolidation_worker_ = std::make_unique<ConsolidationWorker>(consol_cfg);
 
     // DerivedExtractor (depends on write_gate + lineage)
-    derived_extractor_ = std::make_unique<DerivedExtractor>(*write_gate_, *lineage_index_);
+    derived_extractor_ = std::make_unique<DerivedExtractor>(*write_gate_, lineageIndex());
 
     // Reconciler (optional; only created when feature flag is on, and only
     // when an LLM provider is available).
@@ -308,9 +293,9 @@ Result<void, Error> Engine::init() {
 
     // Business logic layers
     capture_ = std::make_unique<CapturePipeline>(
-        *memory_store_, *graph_store_, *task_queue_, llm_, embedder_,
+        memoryStore(), graphStore(), *task_queue_, llm_, embedder_,
         feature_gate_.get(), derived_extractor_.get(), write_gate_.get());
-    capture_->setGateLog(gate_log_.get());
+    capture_->setEventsLog(events_log_.get());
     capture_->setReconciler(reconciler_.get());
 
     RetrievalWeights weights;
@@ -321,7 +306,7 @@ Result<void, Error> Engine::init() {
     weights.importance = config_.getFloat("importance_weight", 0.1f);
 
     retrieval_ = std::make_unique<RetrievalPipeline>(
-        *memory_store_, *graph_store_, llm_, embedder_, weights);
+        memoryStore(), graphStore(), llm_, embedder_, weights);
     retrieval_->setCapturePipeline(capture_.get());
 
     // Aggregate staleness filter (V2). Reads its own flag and persists
@@ -330,18 +315,17 @@ Result<void, Error> Engine::init() {
         AggregateStalenessFilter::Config sf_cfg;
         sf_cfg.enabled = true;
         staleness_filter_ = std::make_unique<AggregateStalenessFilter>(sf_cfg);
-        stale_log_ = std::make_unique<StaleLog>(store_config.data_dir);
-        stale_log_->open();
-        stale_log_->replay();
-        retrieval_->setStalenessFilter(staleness_filter_.get(), stale_log_.get());
-        spdlog::info("Aggregate staleness filter enabled");
+        // RecallStale events go into the unified events.log instead of a
+        // dedicated recall_stale.log (kept around until Phase 4 cleanup).
+        retrieval_->setStalenessFilter(staleness_filter_.get(), events_log_.get());
+        spdlog::info("Aggregate staleness filter enabled (emits to events.log)");
     }
 
-    metacog_ = std::make_unique<MetaCognition>(*memory_store_, *graph_store_);
-    session_mgr_ = std::make_unique<SessionManager>(*memory_store_, llm_, *capture_,
-                                                     store_config.data_dir);
-    backup_mgr_ = std::make_unique<BackupManager>(*memory_store_, *graph_store_);
-    auth_mgr_ = std::make_unique<AuthManager>(*memory_store_);
+    metacog_ = std::make_unique<MetaCognition>(memoryStore(), graphStore());
+    session_mgr_ = std::make_unique<SessionManager>(memoryStore(), llm_, *capture_,
+                                                     config_.get("data_dir", "./amind_data"));
+    backup_mgr_ = std::make_unique<BackupManager>(memoryStore(), graphStore());
+    auth_mgr_ = std::make_unique<AuthManager>(memoryStore());
 
     // ── Register onChange callbacks AFTER subsystems are created ──
     registerCallbacks();
@@ -360,11 +344,13 @@ void Engine::shutdown() {
     if (forget_thread_.joinable()) forget_thread_.join();
     if (consolidation_thread_.joinable()) consolidation_thread_.join();
     if (task_executor_) task_executor_->shutdown();
-    if (graph_store_) {
-        graph_store_->checkpoint();
-        graph_store_->flush();
+    {
+        std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+        for (auto& [id, store] : agent_stores_) {
+            if (store->graph) { store->graph->checkpoint(); store->graph->flush(); }
+            if (store->memory) store->memory->flush();
+        }
     }
-    if (memory_store_) memory_store_->flush();
     spdlog::info("amind engine shutdown complete");
 }
 
@@ -393,32 +379,45 @@ Engine::ForgetCycleResult Engine::runForgetCycleOnce() {
     ForgetCycleResult out{};
 
     // Sample a fraction of memories and compute signals
-    std::vector<std::pair<uint64_t, ForgetSignals>> batch;
+    std::vector<std::tuple<MemoryStore*, uint64_t, ForgetSignals>> batch;
     uint32_t now = MemoryRecord::currentTimeSec();
     float stale_hours = forget_engine_->config().stale_hours;
 
-    memory_store_->scanAll([&](const MemoryRecord& rec) {
-        if (!rec.isAlive()) return;
-        // Sample based on configured ratio
-        if ((rec.memory_id % 100) >= static_cast<uint64_t>(
-                forget_engine_->config().sample_ratio * 100)) return;
+    {
+        std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+        for (auto& [aid, store] : agent_stores_) {
+            store->memory->scanAll([&](const MemoryRecord& rec) {
+                if (!rec.isAlive()) return;
+                // Sample based on configured ratio
+                if ((rec.memory_id % 100) >= static_cast<uint64_t>(
+                        forget_engine_->config().sample_ratio * 100)) return;
 
-        ForgetSignals sig;
-        float hours_since_access = (now - rec.last_accessed) / 3600.0f;
-        sig.staleness = std::min(1.0f, hours_since_access / stale_hours);
-        sig.low_access = std::max(0.0f, 1.0f - std::log(1.0f + rec.access_count) / 5.0f);
-        sig.low_importance = 1.0f - rec.importance;
-        sig.conflict_penalty = (rec.confidence == Confidence::Conflicted) ? 1.0f : 0.0f;
-        sig.verified_bonus = (rec.confidence == Confidence::Verified) ? 1.0f : 0.0f;
-        batch.emplace_back(rec.memory_id, sig);
-    });
+                ForgetSignals sig;
+                float hours_since_access = (now - rec.last_accessed) / 3600.0f;
+                sig.staleness = std::min(1.0f, hours_since_access / stale_hours);
+                sig.low_access = std::max(0.0f, 1.0f - std::log(1.0f + rec.access_count) / 5.0f);
+                sig.low_importance = 1.0f - rec.importance;
+                sig.conflict_penalty = (rec.confidence_level == Confidence::Conflicted) ? 1.0f : 0.0f;
+                sig.verified_bonus = (rec.confidence_level == Confidence::Verified) ? 1.0f : 0.0f;
+                batch.emplace_back(store->memory.get(), rec.memory_id, sig);
+            });
+        }
+    }
 
     if (batch.empty()) {
         spdlog::info("ForgetEngine GC cycle: no live memories sampled");
         return out;
     }
 
-    auto results = forget_engine_->runCycle(batch);
+    // Build memory_id → MemoryStore* mapping and convert to pair batch for ForgetEngine API
+    std::unordered_map<uint64_t, MemoryStore*> id_to_store;
+    std::vector<std::pair<uint64_t, ForgetSignals>> pair_batch;
+    pair_batch.reserve(batch.size());
+    for (const auto& [store_ptr, mid, sig] : batch) {
+        id_to_store[mid] = store_ptr;
+        pair_batch.emplace_back(mid, sig);
+    }
+    auto results = forget_engine_->runCycle(pair_batch);
     out.evaluated = results.size();
 
     const bool shadow = forget_engine_->isShadowMode();
@@ -426,6 +425,9 @@ Engine::ForgetCycleResult Engine::runForgetCycleOnce() {
     const uint64_t now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
+    // One trace per GC cycle — every GcDecay/Archive/Tombstone event from this
+    // cycle shares trace_id so /v1/traces/{id} returns the whole sweep.
+    const uint64_t gc_trace_id = now_ms;
 
     // Apply GC actions (unless shadow mode), and audit-log every
     // non-trivial decision. We skip "below all thresholds" no-ops to
@@ -434,12 +436,14 @@ Engine::ForgetCycleResult Engine::runForgetCycleOnce() {
     for (const auto& eval : results) {
         if (eval.forget_score < decay_thr) continue;
 
+        uint64_t mid = eval.memory_id;
+        MemoryStore* mem_store = id_to_store[mid];
         MemoryPhase before = MemoryPhase::Active;
-        std::string ns_str;
+        std::string agent_id_str;
         std::string preview;
-        if (auto rec = memory_store_->get(eval.memory_id); rec.ok()) {
+        if (auto rec = mem_store->get(mid); rec.ok()) {
             before = rec->phase;
-            ns_str = memory_store_->namespaceFromHash(rec->namespace_hash);
+            agent_id_str = rec->agent_id;
             // UTF-8-safe truncation: never split a code-point. For amind's
             // typical Chinese content a code-point is ≤4 bytes.
             preview = rec->content;
@@ -454,26 +458,38 @@ Engine::ForgetCycleResult Engine::runForgetCycleOnce() {
         MemoryPhase after = before;
         if (!shadow) {
             if (eval.recommended_action == ForgetLogEntry::Decision::Tombstone) {
-                memory_store_->remove(eval.memory_id);
+                mem_store->remove(mid);
                 after = MemoryPhase::Tombstone;
                 ++out.actioned;
             }
             // Archive and Decay are logged but not implemented as store ops yet.
         }
 
-        ForgetLogEntry log_entry;
-        log_entry.timestamp_ms = now_ms;
-        log_entry.memory_id    = eval.memory_id;
-        log_entry.decision     = eval.recommended_action;
-        log_entry.reason       = eval.reason +
-                                 " (forget_score=" + std::to_string(eval.forget_score) +
-                                 ", shadow=" + (shadow ? "yes" : "no") + ")";
-        log_entry.before_state = before;
-        log_entry.after_state  = after;
-        log_entry.gc_worker_id = "main";
-        log_entry.namespace_   = std::move(ns_str);
-        log_entry.content_preview = std::move(preview);
-        forget_engine_->logEntry(std::move(log_entry));
+        // Emit unified MemoryEvent (Phase 2 of unified observability refactor).
+        // The legacy ForgetEngine in-memory log is no longer the source of
+        // truth; events.log is.
+        if (events_log_) {
+            MemoryEvent ev;
+            ev.memory_id    = mid;
+            ev.agent_id     = agent_id_str;
+            ev.trace_id     = gc_trace_id;
+            ev.timestamp_ms = now_ms;
+            switch (eval.recommended_action) {
+                case ForgetLogEntry::Decision::Decay:     ev.kind = EventKind::GcDecay;     break;
+                case ForgetLogEntry::Decision::Archive:   ev.kind = EventKind::GcArchive;   break;
+                case ForgetLogEntry::Decision::Tombstone: ev.kind = EventKind::GcTombstone; break;
+                default:                                  ev.kind = EventKind::GcDecay;     break;
+            }
+            ev.status  = EventStatus::Ok;
+            ev.summary = preview.empty() ? truncateUtf8(eval.reason, 80) : preview;
+            ev.attrs["forget_score"] = std::to_string(eval.forget_score);
+            ev.attrs["reason"]       = eval.reason;
+            ev.attrs["before_state"] = phaseToString(before);
+            ev.attrs["after_state"]  = phaseToString(after);
+            ev.attrs["shadow"]       = shadow ? "yes" : "no";
+            ev.attrs["gc_worker_id"] = "main";
+            events_log_->append(std::move(ev));
+        }
         ++out.logged;
     }
 
@@ -524,9 +540,14 @@ Engine::ConsolidationCycleResult Engine::runConsolidationCycleOnce() {
     if (!incremental) {
         // ── Full mode: O(n²) — only for small stores or first-time cleanup ──
         std::vector<MemoryRecord> all_alive;
-        memory_store_->scanAll([&](const MemoryRecord& rec) {
-            if (rec.isAlive()) all_alive.push_back(rec);
-        });
+        {
+            std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+            for (auto& [aid, store] : agent_stores_) {
+                store->memory->scanAll([&](const MemoryRecord& rec) {
+                    if (rec.isAlive()) all_alive.push_back(rec);
+                });
+            }
+        }
         checked_count = all_alive.size();
 
         if (!all_alive.empty()) {
@@ -546,7 +567,14 @@ Engine::ConsolidationCycleResult Engine::runConsolidationCycleOnce() {
             for (const auto& dr : dedup_results) {
                 for (uint64_t archived_id : dr.archived_ids) {
                     if (!feature_gate_->isGlobalShadowMode()) {
-                        memory_store_->remove(archived_id);
+                        // Find which store owns this memory_id and remove from it
+                        std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+                        for (auto& [aid, store] : agent_stores_) {
+                            if (store->memory->get(archived_id).ok()) {
+                                store->memory->remove(archived_id);
+                                break;
+                            }
+                        }
                     }
                     dedup_count++;
                 }
@@ -562,43 +590,63 @@ Engine::ConsolidationCycleResult Engine::runConsolidationCycleOnce() {
 
         // Collect records to check
         std::vector<MemoryRecord> to_check;
-        if (is_sampled_full) {
-            // Sampled-full: random fraction of ALL alive memories
-            uint32_t sample_mod = static_cast<uint32_t>(
-                std::max(1.0f, 1.0f / sampled_full_ratio));
-            memory_store_->scanAll([&](const MemoryRecord& rec) {
-                if (!rec.isAlive()) return;
-                if (rec.embedding.empty()) return;
-                if ((rec.memory_id % sample_mod) == 0) {
-                    to_check.push_back(rec);
+        {
+            std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+            if (is_sampled_full) {
+                // Sampled-full: random fraction of ALL alive memories
+                uint32_t sample_mod = static_cast<uint32_t>(
+                    std::max(1.0f, 1.0f / sampled_full_ratio));
+                for (auto& [aid, store] : agent_stores_) {
+                    store->memory->scanAll([&](const MemoryRecord& rec) {
+                        if (!rec.isAlive()) return;
+                        if (rec.embedding.empty()) return;
+                        if ((rec.memory_id % sample_mod) == 0) {
+                            to_check.push_back(rec);
+                        }
+                    });
                 }
-            });
-            spdlog::info("Consolidation: sampled-full cycle #{} — sampling {} records (ratio={:.2f})",
-                         cycle_count, to_check.size(), sampled_full_ratio);
-        } else {
-            // Incremental: only memories created since last cycle
-            memory_store_->scanAll([&](const MemoryRecord& rec) {
-                if (!rec.isAlive()) return;
-                if (rec.embedding.empty()) return;
-                if (rec.created_at >= last_cycle_time) {
-                    to_check.push_back(rec);
+                spdlog::info("Consolidation: sampled-full cycle #{} — sampling {} records (ratio={:.2f})",
+                             cycle_count, to_check.size(), sampled_full_ratio);
+            } else {
+                // Incremental: only memories created since last cycle
+                for (auto& [aid, store] : agent_stores_) {
+                    store->memory->scanAll([&](const MemoryRecord& rec) {
+                        if (!rec.isAlive()) return;
+                        if (rec.embedding.empty()) return;
+                        if (rec.created_at >= last_cycle_time) {
+                            to_check.push_back(rec);
+                        }
+                    });
                 }
-            });
+            }
         }
         checked_count = to_check.size();
 
         // Dedup each record against HNSW neighbors
         for (const auto& rec : to_check) {
-            auto neighbors = memory_store_->searchSimilar(rec.embedding, 5);
+            // Find which store owns this record
+            MemoryStore* owner_store = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+                for (auto& [aid, store] : agent_stores_) {
+                    if (store->memory->get(rec.memory_id).ok()) {
+                        owner_store = store->memory.get();
+                        break;
+                    }
+                }
+            }
+            if (!owner_store) continue;
+
+            auto neighbors = owner_store->searchSimilar(rec.embedding, 5);
             for (const auto& [nid, sim] : neighbors) {
                 if (nid == rec.memory_id) continue;
                 if (sim < dedup_threshold) continue;
-                auto nrec = memory_store_->get(nid);
+                auto nrec = owner_store->get(nid);
                 if (!nrec.ok() || !nrec->isAlive()) continue;
                 uint64_t to_archive = (rec.importance >= nrec->importance)
                                       ? nid : rec.memory_id;
                 if (!feature_gate_->isGlobalShadowMode()) {
-                    memory_store_->remove(to_archive);
+                    owner_store->remove(to_archive);
                 }
                 dedup_count++;
                 break;  // one dedup per record per cycle
@@ -756,16 +804,28 @@ void Engine::registerVariables() {
 void Engine::registerCallbacks() {
     // Memory engine dynamic params
     var_mgr_->onChange("conflict_similarity_threshold", [this](auto&, auto& v) {
-        memory_store_->setConflictThreshold(std::stof(v));
+        std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+        for (auto& [id, store] : agent_stores_) {
+            store->memory->setConflictThreshold(std::stof(v));
+        }
     });
     var_mgr_->onChange("decay_rate", [this](auto&, auto& v) {
-        memory_store_->setDecayRate(std::stof(v));
+        std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+        for (auto& [id, store] : agent_stores_) {
+            store->memory->setDecayRate(std::stof(v));
+        }
     });
     var_mgr_->onChange("importance_boost", [this](auto&, auto& v) {
-        memory_store_->setImportanceBoost(std::stof(v));
+        std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+        for (auto& [id, store] : agent_stores_) {
+            store->memory->setImportanceBoost(std::stof(v));
+        }
     });
     var_mgr_->onChange("stale_threshold_hours", [this](auto&, auto& v) {
-        memory_store_->setStaleThresholdHours(static_cast<uint32_t>(std::stoi(v)));
+        std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+        for (auto& [id, store] : agent_stores_) {
+            store->memory->setStaleThresholdHours(static_cast<uint32_t>(std::stoi(v)));
+        }
     });
 
     // Retrieval weights
@@ -841,6 +901,167 @@ void Engine::registerCallbacks() {
         cfg.deferred_threshold = std::stof(v);
         write_gate_->setConfig(cfg);
     });
+}
+
+// ── Agent Management ──
+
+Result<void, Error> Engine::initAgentStore(AgentStore& store) {
+    auto data_dir = config_.get("data_dir", "./amind_data");
+    auto agent_dir = data_dir + "/agents/" + store.agent_id;
+    auto embed_dim = static_cast<size_t>(config_.getInt("embedding_dimension", 4096));
+
+    // Create MemoryStore with per-agent data directory
+    MemoryStore::Config sc;
+    sc.data_dir = agent_dir;
+    sc.embedding_dim = embed_dim;
+    sc.conflict_similarity_threshold = config_.getFloat("conflict_similarity_threshold", 0.85f);
+    sc.stale_threshold_hours = static_cast<uint32_t>(config_.getInt("stale_threshold_hours", 720));
+    sc.decay_rate = config_.getFloat("decay_rate", 0.01f);
+    sc.importance_boost = config_.getFloat("importance_boost", 0.1f);
+    sc.hnsw_max_connections = static_cast<size_t>(config_.getInt("hnsw_max_connections", 16));
+    sc.hnsw_ef_construction = static_cast<size_t>(config_.getInt("hnsw_ef_construction", 200));
+    sc.hnsw_hot_capacity = static_cast<size_t>(config_.getInt("hot_capacity", 50000));
+    sc.hnsw_cold_tier_path = config_.get("cold_tier_path", "");
+    sc.hnsw_eviction_ratio = config_.getFloat("eviction_ratio", 0.1f);
+    sc.hnsw_save_interval = static_cast<uint32_t>(config_.getInt("hnsw_save_interval", 60));
+    sc.lsm_flush_interval = static_cast<uint32_t>(config_.getInt("lsm_flush_interval", 30));
+
+    store.memory = std::make_unique<MemoryStore>(sc);
+    auto result = store.memory->init();
+    if (!result.ok()) return result;
+
+    // Graph store
+    store.graph = std::make_unique<GraphStore>(agent_dir + "/graph");
+    store.graph->recover();
+
+    // Lineage index
+    store.lineage = std::make_unique<LineageIndex>();
+
+    spdlog::info("AgentStore initialized: agent_id={}, data_dir={}", store.agent_id, agent_dir);
+    return Result<void, Error>();
+}
+
+Result<void, Error> Engine::registerAgent(const std::string& agent_id,
+                                           const std::string& display_name,
+                                           const std::string& domain) {
+    std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+    if (agent_stores_.count(agent_id)) {
+        return makeError(Error::AlreadyExists, "agent already registered: " + agent_id);
+    }
+
+    auto store = std::make_unique<AgentStore>();
+    store->agent_id = agent_id;
+    store->display_name = display_name.empty() ? agent_id : display_name;
+    store->domain = domain;
+
+    auto result = initAgentStore(*store);
+    if (!result.ok()) return result;
+
+    agent_stores_[agent_id] = std::move(store);
+    saveAgentsMeta();
+    spdlog::info("Agent registered: {} ({})", agent_id, display_name);
+    return Result<void, Error>();
+}
+
+Engine::AgentStore& Engine::getAgentStore(const std::string& agent_id) {
+    std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+    auto it = agent_stores_.find(agent_id);
+    if (it != agent_stores_.end()) return *it->second;
+
+    // Auto-create "default" if missing
+    auto store = std::make_unique<AgentStore>();
+    store->agent_id = agent_id;
+    store->display_name = agent_id;
+    auto result = initAgentStore(*store);
+    if (!result.ok()) {
+        spdlog::error("Failed to auto-create AgentStore {}: {}", agent_id, result.error().message);
+        // Fatal — should not happen in normal operation
+        throw std::runtime_error("Failed to create AgentStore: " + agent_id);
+    }
+    auto& ref = *store;
+    agent_stores_[agent_id] = std::move(store);
+    saveAgentsMeta();
+    return ref;
+}
+
+Engine::AgentStore* Engine::findAgentStore(const std::string& agent_id) {
+    std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+    auto it = agent_stores_.find(agent_id);
+    return it != agent_stores_.end() ? it->second.get() : nullptr;
+}
+
+std::vector<std::string> Engine::listAgents() const {
+    std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+    std::vector<std::string> ids;
+    ids.reserve(agent_stores_.size());
+    for (const auto& [id, _] : agent_stores_) ids.push_back(id);
+    return ids;
+}
+
+Result<void, Error> Engine::removeAgent(const std::string& agent_id) {
+    if (agent_id == "default") {
+        return makeError(Error::InvalidArgument, "cannot remove the default agent");
+    }
+    std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+    auto it = agent_stores_.find(agent_id);
+    if (it == agent_stores_.end()) {
+        return makeError(Error::NotFound, "agent not found: " + agent_id);
+    }
+    // Flush before removing
+    if (it->second->graph) { it->second->graph->checkpoint(); it->second->graph->flush(); }
+    if (it->second->memory) it->second->memory->flush();
+    agent_stores_.erase(it);
+    saveAgentsMeta();
+    spdlog::info("Agent removed: {}", agent_id);
+    return Result<void, Error>();
+}
+
+void Engine::loadAgentsMeta() {
+    // Create meta directory if needed
+    auto data_dir = config_.get("data_dir", "./amind_data");
+    auto meta_dir = data_dir + "/meta";
+    std::filesystem::create_directories(meta_dir);
+    agents_meta_path_ = meta_dir + "/agents.json";
+
+    std::ifstream ifs(agents_meta_path_);
+    if (!ifs.is_open()) {
+        spdlog::info("No agents.json found, will create default agent");
+        return;
+    }
+
+    try {
+        auto json = nlohmann::json::parse(ifs);
+        for (const auto& entry : json["agents"]) {
+            auto store = std::make_unique<AgentStore>();
+            store->agent_id = entry.value("agent_id", "default");
+            store->display_name = entry.value("display_name", store->agent_id);
+            store->domain = entry.value("domain", "general");
+            agent_stores_[store->agent_id] = std::move(store);
+        }
+        spdlog::info("Loaded {} agents from {}", agent_stores_.size(), agents_meta_path_);
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to parse agents.json: {}, will recreate", e.what());
+    }
+}
+
+void Engine::saveAgentsMeta() {
+    nlohmann::json json;
+    json["agents"] = nlohmann::json::array();
+    for (const auto& [id, store] : agent_stores_) {
+        json["agents"].push_back({
+            {"agent_id", store->agent_id},
+            {"display_name", store->display_name},
+            {"domain", store->domain}
+        });
+    }
+
+    std::filesystem::create_directories(std::filesystem::path(agents_meta_path_).parent_path());
+    std::ofstream ofs(agents_meta_path_);
+    if (ofs.is_open()) {
+        ofs << json.dump(2);
+    } else {
+        spdlog::warn("Failed to write agents.json to {}", agents_meta_path_);
+    }
 }
 
 }  // namespace amind

@@ -20,7 +20,11 @@ struct StoreResponse {
 struct RecallItem {
     uint64_t memory_id{0};
     std::string content;
-    std::string owner;
+    std::string agent_id;
+    std::string user_id;
+    std::string scope;
+    std::string memory_type;
+    std::string tier;
     std::string phase;
     std::string confidence;
     float score{0.0f};
@@ -30,7 +34,11 @@ struct RecallItem {
 struct MemoryInfo {
     uint64_t memory_id{0};
     std::string content;
-    std::string owner;
+    std::string agent_id;
+    std::string user_id;
+    std::string scope;
+    std::string memory_type;
+    std::string tier;
     std::string phase;
     std::string confidence;
     uint32_t version{0};
@@ -47,7 +55,8 @@ struct VersionInfo {
 
 struct SessionInfo {
     uint64_t session_id{0};
-    std::string namespace_;
+    std::string agent_id;
+    std::string user_id;
     uint16_t turn_count{0};
     std::string current_intent;
     size_t memory_count{0};
@@ -85,11 +94,14 @@ public:
 
     // Memory CRUD
     Result<StoreResponse> store(const std::string& content,
-                                const std::string& namespace_ = "default",
-                                const std::string& owner = "session");
+                                const std::string& agent_id = "default_agent",
+                                const std::string& user_id = "anonymous",
+                                const std::string& scope = "private",
+                                const std::string& memory_type = "ephemeral");
 
     Result<std::vector<RecallItem>> recall(const std::string& query,
-                                           const std::string& namespace_ = "default",
+                                           const std::string& agent_id = "default_agent",
+                                           const std::string& user_id = "anonymous",
                                            int top_k = 10);
 
     Result<MemoryInfo> get(uint64_t memory_id);
@@ -103,10 +115,12 @@ public:
     // Intercept
     Result<std::vector<uint64_t>> intercept(
         const std::vector<std::pair<std::string, std::string>>& messages,
-        const std::string& namespace_ = "default");
+        const std::string& agent_id = "default_agent",
+        const std::string& user_id = "anonymous");
 
     // Sessions
-    Result<uint64_t> startSession(const std::string& namespace_ = "default");
+    Result<uint64_t> startSession(const std::string& agent_id = "default_agent",
+                                  const std::string& user_id = "anonymous");
 
     Result<void, Error> recordTurn(uint64_t session_id,
                                     const std::string& user_input,
@@ -117,7 +131,7 @@ public:
     Result<SessionInfo> getSessionSummary(uint64_t session_id);
 
     // MetaCognition
-    Result<CoverageInfo> getCoverage(const std::string& namespace_ = "");
+    Result<CoverageInfo> getCoverage(const std::string& agent_id = "");
 
     Result<std::vector<ConflictItem>> getConflicts();
 

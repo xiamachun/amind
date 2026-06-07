@@ -23,7 +23,7 @@ SessionManager::SessionManager(MemoryStore& store, std::shared_ptr<LLMProvider> 
     }
 }
 
-Result<Session> SessionManager::startSession(const std::string& namespace_) {
+Result<Session> SessionManager::startSession(const std::string& agent_id, const std::string& user_id) {
     std::lock_guard lock(mutex_);
 
     // Purge closed sessions older than 1 hour to prevent unbounded growth
@@ -39,12 +39,13 @@ Result<Session> SessionManager::startSession(const std::string& namespace_) {
 
     Session session;
     session.session_id = id_gen_.nextId();
-    session.namespace_ = namespace_;
+    session.agent_id = agent_id;
+    session.user_id = user_id;
     session.started_at = now;
     session.last_turn_at = session.started_at;
     sessions_[session.session_id] = session;
     if (wal_) wal_->appendStart(session);
-    spdlog::info("Session started: id={}, namespace={}", session.session_id, namespace_);
+    spdlog::info("Session started: id={}, agent={}, user={}", session.session_id, agent_id, user_id);
     return session;
 }
 
@@ -166,7 +167,8 @@ Result<SessionSummary> SessionManager::getSessionSummary(uint64_t session_id) co
     const auto& s = it->second;
     SessionSummary summary;
     summary.session_id = s.session_id;
-    summary.namespace_ = s.namespace_;
+    summary.agent_id = s.agent_id;
+    summary.user_id = s.user_id;
     summary.turn_count = s.turn_count;
     summary.current_intent = s.current_intent;
     summary.memory_count = s.memory_ids.size();
@@ -240,7 +242,7 @@ std::vector<uint64_t> SessionManager::extractFacts(const Session& session,
                 if (fact_str.empty()) continue;
 
                 // Store fact via capture pipeline (pre_extracted=true: skip redundant LLM extraction)
-                auto cap_result = capture_.capture(fact_str, session.namespace_, MemoryOwner::User, {}, true);
+                auto cap_result = capture_.capture(fact_str, session.agent_id, session.user_id, MemoryScope::Private, MemoryType::UserProfile, {}, true);
                 if (cap_result.ok()) {
                     for (auto mid : *cap_result) {
                         ids.push_back(mid);
@@ -263,7 +265,8 @@ std::vector<SessionSummary> SessionManager::listSessions() const {
     for (const auto& [id, s] : sessions_) {
         SessionSummary sum;
         sum.session_id = s.session_id;
-        sum.namespace_ = s.namespace_;
+        sum.agent_id = s.agent_id;
+        sum.user_id = s.user_id;
         sum.turn_count = s.turn_count;
         sum.current_intent = s.current_intent;
         sum.memory_count = s.memory_ids.size();

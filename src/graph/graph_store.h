@@ -74,6 +74,10 @@ public:
     /// Get neighbors with full edge info (for WebUI detail page).
     std::vector<GraphEdge> getNeighborEdges(uint64_t memory_id) const;
 
+    /// Get edges pointing INTO this memory (e.g. DerivedFrom edges from
+    /// derived facts, which are stored only in the derived's adjacency).
+    std::vector<GraphEdge> getIncomingEdges(uint64_t memory_id) const;
+
 
     /// Get all edges (for backup export).
     std::vector<GraphEdge> getAllEdges() const;

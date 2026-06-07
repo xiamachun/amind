@@ -33,12 +33,16 @@ static Result<json> parseJsonResponse(const HttpClient::Response& resp) {
 // ── Memory CRUD ────────────────────────────────────────────────────────────
 
 Result<StoreResponse> AmindClient::store(const std::string& content,
-                                          const std::string& namespace_,
-                                          const std::string& owner) {
+                                          const std::string& agent_id,
+                                          const std::string& user_id,
+                                          const std::string& scope,
+                                          const std::string& memory_type) {
     json body;
     body["content"] = content;
-    body["namespace"] = namespace_;
-    body["owner"] = owner;
+    body["agent_id"] = agent_id;
+    body["user_id"] = user_id;
+    body["scope"] = scope;
+    body["memory_type"] = memory_type;
 
     auto resp = HttpClient::post(host_, port_, "/v1/memories", body.dump(), timeout_ms_, pool_.get());
     if (!resp.ok()) return resp.error();
@@ -58,11 +62,13 @@ Result<StoreResponse> AmindClient::store(const std::string& content,
 }
 
 Result<std::vector<RecallItem>> AmindClient::recall(const std::string& query,
-                                                     const std::string& namespace_,
+                                                     const std::string& agent_id,
+                                                     const std::string& user_id,
                                                      int top_k) {
     json body;
     body["query"] = query;
-    body["namespace"] = namespace_;
+    body["agent_id"] = agent_id;
+    body["user_id"] = user_id;
     body["top_k"] = top_k;
 
     auto resp = HttpClient::post(host_, port_, "/v1/memories/recall", body.dump(), timeout_ms_, pool_.get());
@@ -78,7 +84,11 @@ Result<std::vector<RecallItem>> AmindClient::recall(const std::string& query,
             RecallItem r;
             r.memory_id = item.value("memory_id", uint64_t(0));
             r.content = item.value("content", "");
-            r.owner = item.value("owner", "");
+            r.agent_id = item.value("agent_id", "");
+            r.user_id = item.value("user_id", "");
+            r.scope = item.value("scope", "");
+            r.memory_type = item.value("memory_type", "");
+            r.tier = item.value("tier", "");
             r.phase = item.value("phase", "");
             r.confidence = item.value("confidence", "");
             r.score = item.value("score", 0.0f);
@@ -101,7 +111,11 @@ Result<MemoryInfo> AmindClient::get(uint64_t memory_id) {
     MemoryInfo info;
     info.memory_id = j.value("memory_id", uint64_t(0));
     info.content = j.value("content", "");
-    info.owner = j.value("owner", "");
+    info.agent_id = j.value("agent_id", "");
+    info.user_id = j.value("user_id", "");
+    info.scope = j.value("scope", "");
+    info.memory_type = j.value("memory_type", "");
+    info.tier = j.value("tier", "");
     info.phase = j.value("phase", "");
     info.confidence = j.value("confidence", "");
     info.version = j.value("version", uint32_t(0));
@@ -171,9 +185,11 @@ Result<DeleteResponse> AmindClient::remove(uint64_t memory_id) {
 
 Result<std::vector<uint64_t>> AmindClient::intercept(
     const std::vector<std::pair<std::string, std::string>>& messages,
-    const std::string& namespace_) {
+    const std::string& agent_id,
+    const std::string& user_id) {
     json body;
-    body["namespace"] = namespace_;
+    body["agent_id"] = agent_id;
+    body["user_id"] = user_id;
     json msgs = json::array();
     for (const auto& [role, content] : messages) {
         msgs.push_back({{"role", role}, {"content", content}});
@@ -198,9 +214,11 @@ Result<std::vector<uint64_t>> AmindClient::intercept(
 
 // ── Sessions ───────────────────────────────────────────────────────────────
 
-Result<uint64_t> AmindClient::startSession(const std::string& namespace_) {
+Result<uint64_t> AmindClient::startSession(const std::string& agent_id,
+                                           const std::string& user_id) {
     json body;
-    body["namespace"] = namespace_;
+    body["agent_id"] = agent_id;
+    body["user_id"] = user_id;
 
     auto resp = HttpClient::post(host_, port_, "/v1/sessions/start", body.dump(), timeout_ms_, pool_.get());
     if (!resp.ok()) return resp.error();
@@ -253,7 +271,8 @@ Result<SessionInfo> AmindClient::getSessionSummary(uint64_t session_id) {
 
     SessionInfo info;
     info.session_id = j.value("session_id", uint64_t(0));
-    info.namespace_ = j.value("namespace", "");
+    info.agent_id = j.value("agent_id", "");
+    info.user_id = j.value("user_id", "");
     info.turn_count = j.value("turn_count", uint16_t(0));
     info.current_intent = j.value("current_intent", "");
     info.memory_count = j.value("memory_count", size_t(0));
@@ -266,10 +285,10 @@ Result<SessionInfo> AmindClient::getSessionSummary(uint64_t session_id) {
 
 // ── MetaCognition ──────────────────────────────────────────────────────────
 
-Result<CoverageInfo> AmindClient::getCoverage(const std::string& namespace_) {
+Result<CoverageInfo> AmindClient::getCoverage(const std::string& agent_id) {
     std::string path = "/v1/metacognition/coverage";
-    if (!namespace_.empty()) {
-        path += "?namespace=" + namespace_;
+    if (!agent_id.empty()) {
+        path += "?agent_id=" + agent_id;
     }
     auto resp = HttpClient::get(host_, port_, path, timeout_ms_, pool_.get());
     if (!resp.ok()) return resp.error();

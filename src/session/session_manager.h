@@ -30,7 +30,8 @@ struct TurnRecord {
 /// Session data with full conversation tracking.
 struct Session {
     uint64_t session_id{0};
-    std::string namespace_;   // tenant isolation key (see core/memory_record.h)
+    std::string agent_id;
+    std::string user_id;
     uint32_t started_at{0};
     uint32_t last_turn_at{0};
     uint16_t turn_count{0};
@@ -44,7 +45,8 @@ struct Session {
 /// Session summary for API response.
 struct SessionSummary {
     uint64_t session_id;
-    std::string namespace_;
+    std::string agent_id;
+    std::string user_id;
     uint16_t turn_count;
     std::string current_intent;
     size_t memory_count;
@@ -62,7 +64,7 @@ public:
                    CapturePipeline& capture, const std::string& data_dir = "");
     ~SessionManager();
 
-    Result<Session> startSession(const std::string& namespace_);
+    Result<Session> startSession(const std::string& agent_id, const std::string& user_id);
 
     /// Record a turn with full user input and agent response.
     Result<void, Error> recordTurn(uint64_t session_id,

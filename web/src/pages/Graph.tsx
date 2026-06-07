@@ -115,7 +115,7 @@ export default function Graph() {
             <h3 className="text-sm font-medium text-gray-300">Selected Memory</h3>
             <p className="text-xs text-gray-400 whitespace-pre-wrap">{selected.content}</p>
             <div className="grid grid-cols-2 gap-2 text-xs">
-              <div><span className="text-gray-500">Owner:</span> <span className="text-indigo-300">{selected.owner}</span></div>
+              <div><span className="text-gray-500">Scope:</span> <span className="text-indigo-300">{selected.owner}</span></div>
               <div><span className="text-gray-500">Phase:</span> <span className="text-gray-300">{selected.phase}</span></div>
               <div><span className="text-gray-500">Score:</span> <span className="text-gray-300">{selected.importance.toFixed(3)}</span></div>
               <div><span className="text-gray-500">Version:</span> <span className="text-gray-300">{selected.version}</span></div>

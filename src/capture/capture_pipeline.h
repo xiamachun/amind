@@ -23,13 +23,15 @@ namespace amind {
 class FeatureGate;
 class DerivedExtractor;
 class WriteGate;
-class GateLog;
+// GateLog removed in Phase 4.
+class MemoryEventLog;
 class Reconciler;
 
 /// Fact extracted from conversation by LLM.
 struct ExtractedFact {
     std::string content;
-    MemoryOwner owner{MemoryOwner::Session};
+    MemoryScope scope{MemoryScope::Private};
+    MemoryType memory_type{MemoryType::Ephemeral};
     Confidence confidence{Confidence::Inferred};
     float importance{0.5f};
     std::vector<std::string> entities;
@@ -63,22 +65,31 @@ public:
     /// (content is already a clean fact from SessionManager or external caller).
     Result<std::vector<uint64_t>> capture(
         const std::string& content,
-        const std::string& namespace_,
-        MemoryOwner owner = MemoryOwner::Session,
+        const std::string& agent_id,
+        const std::string& user_id,
+        MemoryScope scope = MemoryScope::Private,
+        MemoryType memory_type = MemoryType::Ephemeral,
         std::map<std::string, std::string> user_metadata = {},
         bool pre_extracted = false);
 
     /// Stage 2: Schedule async refinement for a memory.
-    void scheduleRefinement(uint64_t memory_id, const std::string& namespace_ = "",
-                            bool pre_extracted = false);
+    /// `trace_id` carries the observability trace across the Stage 1 → Stage 2
+    /// boundary so all emitted events (Embed/Gate/Derive/Reconcile) group
+    /// together. 0 = no trace context.
+    void scheduleRefinement(uint64_t memory_id, 
+                            bool pre_extracted = false,
+                            uint64_t trace_id = 0);
 
     /// Intercept: capture from LLM conversation messages.
     Result<std::vector<uint64_t>> interceptCapture(
         const std::vector<std::pair<std::string, std::string>>& messages,
-        const std::string& namespace_);
+        const std::string& agent_id,
+        const std::string& user_id);
 
-    /// Inject GateLog so verdicts get audited. Optional.
-    void setGateLog(GateLog* glog) { gate_log_ = glog; }
+    /// Inject the unified MemoryEventLog. When set, the capture pipeline
+    /// emits Gate / Reconcile / Store / Derive events into it as the single
+    /// source of truth for observability. Phase 4 will remove setGateLog().
+    void setEventsLog(MemoryEventLog* el) { events_log_ = el; }
 
     /// Inject the Reconciler. When set, derived facts get LLM-decided
     /// ADD/REPLACE/RETRACT/REINFORCE/NOOP instead of unconditional ADD.
@@ -101,7 +112,7 @@ private:
     FeatureGate* feature_gate_{nullptr};
     DerivedExtractor* derived_extractor_{nullptr};
     WriteGate* write_gate_{nullptr};
-    GateLog* gate_log_{nullptr};
+    MemoryEventLog* events_log_{nullptr};
     Reconciler* reconciler_{nullptr};
     std::atomic<bool> alive_{true};
 

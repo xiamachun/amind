@@ -113,14 +113,18 @@ class AsyncAmindClient:
     async def store(
         self,
         content: str,
-        namespace: str = "default",
-        owner: str = "user",
+        agent_id: str = "default",
+        user_id: str = "anonymous",
+        scope: str = "private",
+        memory_type: str = "ephemeral",
         metadata: dict | None = None,
     ) -> StoreResponse:
         payload: dict[str, Any] = {
             "content": content,
-            "namespace": namespace,
-            "owner": owner,
+            "agent_id": agent_id,
+            "user_id": user_id,
+            "scope": scope,
+            "memory_type": memory_type,
         }
         if metadata:
             payload["metadata"] = metadata
@@ -130,7 +134,10 @@ class AsyncAmindClient:
     async def recall(
         self,
         query: str,
-        namespace: str = "default",
+        agent_id: str = "default",
+        user_id: str = "anonymous",
+        scope: str = "private",
+        memory_type: str = "ephemeral",
         top_k: int = 10,
         filters: dict | None = None,
         fast: bool = False,
@@ -143,7 +150,10 @@ class AsyncAmindClient:
         """
         payload: dict[str, Any] = {
             "query": query,
-            "namespace": namespace,
+            "agent_id": agent_id,
+            "user_id": user_id,
+            "scope": scope,
+            "memory_type": memory_type,
             "top_k": top_k,
         }
         if filters:
@@ -174,13 +184,22 @@ class AsyncAmindClient:
         self,
         page: int = 1,
         per_page: int = 50,
-        owner: str | None = None,
+        agent_id: str | None = None,
+        user_id: str | None = None,
+        scope: str | None = None,
+        memory_type: str | None = None,
         phase: str | None = None,
         query: str | None = None,
     ) -> ListMemoriesResponse:
         params: dict[str, str] = {"page": str(page), "per_page": str(per_page)}
-        if owner:
-            params["owner"] = owner
+        if agent_id:
+            params["agent_id"] = agent_id
+        if user_id:
+            params["user_id"] = user_id
+        if scope:
+            params["scope"] = scope
+        if memory_type:
+            params["memory_type"] = memory_type
         if phase:
             params["phase"] = phase
         if query:
@@ -193,7 +212,8 @@ class AsyncAmindClient:
     async def intercept(
         self,
         messages: list[Message] | list[dict[str, str]],
-        namespace: str = "default",
+        agent_id: str = "default",
+        user_id: str = "anonymous",
     ) -> InterceptResponse:
         msg_dicts = [
             m.model_dump() if isinstance(m, Message) else m
@@ -201,15 +221,17 @@ class AsyncAmindClient:
         ]
         data = await self._request("POST", "/v1/intercept", json={
             "messages": msg_dicts,
-            "namespace": namespace,
+            "agent_id": agent_id,
+            "user_id": user_id,
         })
         return InterceptResponse(**data)
 
     # ── Sessions ─────────────────────────────────────────────────────────────
 
-    async def session_start(self, namespace: str = "default") -> SessionResponse:
+    async def session_start(self, agent_id: str = "default", user_id: str = "anonymous") -> SessionResponse:
         data = await self._request("POST", "/v1/sessions/start", json={
-            "namespace": namespace,
+            "agent_id": agent_id,
+            "user_id": user_id,
         })
         return SessionResponse(**data)
 
@@ -243,8 +265,8 @@ class AsyncAmindClient:
         data = await self._request("GET", "/v1/metacognition/conflicts")
         return [Conflict(**c) for c in data] if isinstance(data, list) else []
 
-    async def coverage(self, namespace: str = "") -> CoverageStats:
-        params = {"namespace": namespace} if namespace else {}
+    async def coverage(self, agent_id: str = "") -> CoverageStats:
+        params = {"agent_id": agent_id} if agent_id else {}
         data = await self._request("GET", "/v1/metacognition/coverage", params=params)
         return CoverageStats(**data)
 
@@ -293,13 +315,13 @@ class AsyncAmindClient:
         self,
         limit: int = 100,
         decision: str | None = None,            # "Accepted" | "Rejected" | "Deferred"
-        namespace: str | None = None,
+        agent_id: str | None = None,
         since_ms: int | None = None,
         only_unresurrected: bool = False,
     ) -> GateLogResponse:
         params: dict[str, str] = {"limit": str(limit)}
         if decision: params["decision"] = decision
-        if namespace: params["namespace"] = namespace
+        if agent_id: params["agent_id"] = agent_id
         if since_ms is not None: params["since_ms"] = str(since_ms)
         if only_unresurrected: params["only_unresurrected"] = "1"
         data = await self._request("GET", "/v1/gate/log", params=params)
@@ -307,11 +329,11 @@ class AsyncAmindClient:
 
     async def gate_log_stats(
         self,
-        namespace: str | None = None,
+        agent_id: str | None = None,
         since_ms: int | None = None,
     ) -> GateLogStats:
         params: dict[str, str] = {}
-        if namespace: params["namespace"] = namespace
+        if agent_id: params["agent_id"] = agent_id
         if since_ms is not None: params["since_ms"] = str(since_ms)
         data = await self._request("GET", "/v1/gate/log/stats", params=params)
         return GateLogStats(**data)

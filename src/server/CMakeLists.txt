@@ -15,6 +15,7 @@ target_include_directories(amind_server
 target_link_libraries(amind_server
     PUBLIC
         amind_core
+        amind_observability
         amind_memory
         amind_graph
         amind_async
@@ -24,7 +25,6 @@ target_link_libraries(amind_server
         amind_metacognition
         amind_session
         amind_gate
-        amind_gate_log
         amind_lineage
         amind_forget
         amind_conflict

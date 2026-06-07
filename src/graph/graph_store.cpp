@@ -293,4 +293,21 @@ std::vector<GraphEdge> GraphStore::getNeighborEdges(uint64_t memory_id) const {
     return it->second;
 }
 
+std::vector<GraphEdge> GraphStore::getIncomingEdges(uint64_t memory_id) const {
+    std::lock_guard lock(mutex_);
+    std::vector<GraphEdge> result;
+    auto it = reverse_adj_.find(memory_id);
+    if (it == reverse_adj_.end()) return result;
+    for (uint64_t source : it->second) {
+        auto adj_it = adjacency_.find(source);
+        if (adj_it == adjacency_.end()) continue;
+        for (const auto& edge : adj_it->second) {
+            if (edge.to_id == memory_id) {
+                result.push_back(edge);
+            }
+        }
+    }
+    return result;
+}
+
 }  // namespace amind

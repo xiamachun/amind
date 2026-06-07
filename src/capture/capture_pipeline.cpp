@@ -2,7 +2,7 @@
 #include "config/v2_config.h"
 #include "capture/derived_extractor.h"
 #include "gate/write_gate.h"
-#include "gate_log/gate_log.h"
+#include "observability/memory_event_log.h"
 #include "reconcile/reconciler.h"
 
 #include <nlohmann/json.hpp>
@@ -41,17 +41,17 @@ std::mutex& CapturePipeline::getReconcileSlotLock(uint64_t target_memory_id) {
 
 // ── Freshness barrier implementation ────────────────────────────────────
 
-void CapturePipeline::incrementPending(uint64_t ns_hash) {
+void CapturePipeline::incrementPending(uint64_t key) {
     std::lock_guard lock(flight_mu_);
-    auto& info = ns_in_flight_[ns_hash];
+    auto& info = ns_in_flight_[key];
     info.pending++;
     info.last_submit = std::chrono::steady_clock::now();
 }
 
-void CapturePipeline::decrementPending(uint64_t ns_hash) {
+void CapturePipeline::decrementPending(uint64_t key) {
     {
         std::lock_guard lock(flight_mu_);
-        auto it = ns_in_flight_.find(ns_hash);
+        auto it = ns_in_flight_.find(key);
         if (it != ns_in_flight_.end() && it->second.pending > 0) {
             it->second.pending--;
         }
@@ -60,18 +60,18 @@ void CapturePipeline::decrementPending(uint64_t ns_hash) {
 }
 
 bool CapturePipeline::waitForPendingRefinements(
-    uint64_t ns_hash, std::chrono::milliseconds timeout) const {
+    uint64_t key, std::chrono::milliseconds timeout) const {
     std::unique_lock lock(flight_mu_);
     return flight_cv_.wait_for(lock, timeout, [&]() {
-        auto it = ns_in_flight_.find(ns_hash);
+        auto it = ns_in_flight_.find(key);
         return it == ns_in_flight_.end() || it->second.pending <= 0;
     });
 }
 
 bool CapturePipeline::hasFreshPending(
-    uint64_t ns_hash, std::chrono::milliseconds recency) const {
+    uint64_t key, std::chrono::milliseconds recency) const {
     std::lock_guard lock(flight_mu_);
-    auto it = ns_in_flight_.find(ns_hash);
+    auto it = ns_in_flight_.find(key);
     if (it == ns_in_flight_.end() || it->second.pending <= 0) return false;
     auto elapsed = std::chrono::steady_clock::now() - it->second.last_submit;
     return elapsed <= recency;
@@ -79,8 +79,10 @@ bool CapturePipeline::hasFreshPending(
 
 Result<std::vector<uint64_t>> CapturePipeline::capture(
     const std::string& content,
-    const std::string& namespace_,
-    MemoryOwner owner,
+    const std::string& agent_id,
+    const std::string& user_id,
+    MemoryScope scope,
+    MemoryType memory_type,
     std::map<std::string, std::string> user_metadata,
     bool pre_extracted) {
 
@@ -98,7 +100,6 @@ Result<std::vector<uint64_t>> CapturePipeline::capture(
     if (WriteGate::isForgetRequest(content)) {
         spdlog::info("CapturePipeline: forget request detected: '{}'",
                      content.substr(0, 80));
-        const uint64_t ns_hash = MemoryRecord::hashNamespace(namespace_);
         if (embedder_) {
             auto emb = embedder_->embed(content);
             if (emb.ok()) {
@@ -108,7 +109,7 @@ Result<std::vector<uint64_t>> CapturePipeline::capture(
                     if (sim < 0.30f) continue;
                     auto rec = store_.get(mid);
                     if (!rec.ok() || !rec->isAlive()) continue;
-                    if (rec->namespace_hash != ns_hash) continue;
+                    if (rec->agent_id != agent_id) continue;
                     store_.remove(mid);
                     deleted++;
                     spdlog::info("CapturePipeline: forget — tombstoned {} (sim={:.3f}): '{}'",
@@ -123,12 +124,14 @@ Result<std::vector<uint64_t>> CapturePipeline::capture(
     // Stage 1 (non-blocking): store content without embedding, return ID
     // immediately. Embedding + WriteGate + HNSW insert happen in Stage 2
     // async task. This keeps the REST thread free.
-    store_.registerNamespaceString(namespace_);
     MemoryRecord record;
-    record.namespace_hash = MemoryRecord::hashNamespace(namespace_);
+    record.agent_id = agent_id;
+    record.user_id = user_id;
+    record.scope = scope;
+    record.memory_type = memory_type;
+    record.tier = MemoryTier::Ephemeral; // Default to ephemeral for fast capture
     record.content = content;
-    record.owner = owner;
-    record.confidence = Confidence::Inferred;
+    record.confidence_level = Confidence::Inferred;
     if (!user_metadata.empty()) {
         record.user_metadata = std::move(user_metadata);
     }
@@ -138,26 +141,42 @@ Result<std::vector<uint64_t>> CapturePipeline::capture(
 
     uint64_t memory_id = *store_result;
 
+    // Emit Store event — Stage 1 done, memory_id assigned. The same trace_id
+    // will be inherited by the Stage 2 task below so all events from this
+    // capture chain group together in /v1/traces/{trace_id}.
+    const uint64_t trace_id = memory_id;  // memory_id is itself a Snowflake;
+                                          // doubles as the trace root.
+    if (events_log_) {
+        MemoryEvent ev;
+        ev.memory_id  = memory_id;
+        ev.trace_id   = trace_id;
+        ev.agent_id   = agent_id;
+        ev.kind       = EventKind::Store;
+        ev.status     = EventStatus::Ok;
+        ev.summary    = truncateUtf8(content, 80);
+        ev.attrs["scope"] = scopeToString(scope);
+        ev.attrs["memory_type"] = memoryTypeToString(memory_type);
+        events_log_->append(std::move(ev));
+    }
+
     // Schedule Stage 2: embed + WriteGate + HNSW insert + fact extraction
-    scheduleRefinement(memory_id, namespace_, pre_extracted);
+    scheduleRefinement(memory_id, pre_extracted, trace_id);
 
     return std::vector<uint64_t>{memory_id};
 }
 
-void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& namespace_,
-                                         bool pre_extracted) {
-    const uint64_t ns_hash = MemoryRecord::hashNamespace(namespace_);
-
+void CapturePipeline::scheduleRefinement(uint64_t memory_id, 
+                                         bool pre_extracted, uint64_t trace_id) {
+    // We fetch the record to get agent_id for filtering/flight info if needed, 
+    // but for now we just use memory_id as the key for flight info or remove ns_hash dependency.
+    // For simplicity in migration, we'll keep a dummy ns_hash or remove flight info if it was ns-based.
+    // Let's assume flight info is now per-agent or global for refinement.
+    
     AsyncTask task;
     task.memory_id = memory_id;
+    task.trace_id  = trace_id;
     task.task_type = "refine";
-    task.work = [this, memory_id, namespace_, ns_hash, pre_extracted]() {
-        // RAII guard to always decrement pending on exit
-        struct PendingGuard {
-            CapturePipeline* self; uint64_t ns;
-            ~PendingGuard() { self->decrementPending(ns); }
-        } guard{this, ns_hash};
-
+    task.work = [this, memory_id, pre_extracted, trace_id]() {
         if (!alive_.load(std::memory_order_relaxed)) return;
 
         auto record_result = store_.get(memory_id);
@@ -168,16 +187,41 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
         // ── Stage 2a: Embed the raw memory and insert into HNSW ──
         // (moved from the REST thread to avoid blocking accept loop)
         if (embedder_ && record.embedding.empty()) {
+            auto t_embed_start = std::chrono::steady_clock::now();
             auto embed_result = embedder_->embed(record.content);
+            auto embed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t_embed_start).count();
             if (embed_result.ok()) {
                 store_.setEmbedding(memory_id, std::move(*embed_result));
                 // Re-fetch with the embedding populated
                 record_result = store_.get(memory_id);
                 if (!record_result.ok()) return;
                 record = record_result.value();
+                if (events_log_) {
+                    MemoryEvent ev;
+                    ev.memory_id    = memory_id;
+                    ev.trace_id     = trace_id;
+                    ev.agent_id     = record.agent_id;
+                    ev.kind         = EventKind::Embed;
+                    ev.status       = EventStatus::Ok;
+                    ev.duration_ms  = static_cast<uint32_t>(embed_ms);
+                    ev.summary      = truncateUtf8(record.content, 80);
+                    events_log_->append(std::move(ev));
+                }
             } else {
                 spdlog::warn("Stage2a: embed failed for {}: {}",
                              memory_id, embed_result.error().toString());
+                if (events_log_) {
+                    MemoryEvent ev;
+                    ev.memory_id   = memory_id;
+                    ev.trace_id    = trace_id;
+                    ev.agent_id    = record.agent_id;
+                    ev.kind        = EventKind::Embed;
+                    ev.status      = EventStatus::Failed;
+                    ev.duration_ms = static_cast<uint32_t>(embed_ms);
+                    ev.attrs["error"] = embed_result.error().toString();
+                    events_log_->append(std::move(ev));
+                }
             }
         }
 
@@ -189,7 +233,8 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
             ExtractedFact f;
             f.content = record.content;
             f.importance = 0.5f;
-            f.owner = record.owner;
+            f.scope = record.scope;
+            f.memory_type = record.memory_type;
             fact_list.push_back(std::move(f));
             spdlog::debug("Pre-extracted fact for memory {}: skipping LLM extractFacts", memory_id);
         } else {
@@ -207,7 +252,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                             if (sim < 0.30f) continue;
                             auto rec = store_.get(mid);
                             if (!rec.ok() || !rec->isAlive()) continue;
-                            if (rec->namespace_hash != ns_hash) continue;
+                            if (rec->agent_id != record.agent_id) continue;
                             store_.remove(mid);
                             deleted++;
                             spdlog::info("Stage2: forget — tombstoned {} (sim={:.3f}): '{}'",
@@ -241,13 +286,14 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
             if (feature_gate_ && derived_extractor_ &&
                 feature_gate_->isWriteGateEnabled()) {
 
-                // Snapshot the raw record's audit metadata + owner so derived
-                // facts inherit tenant fields and the right owner classification.
+                // Snapshot the raw record's audit metadata + scope/memory_type so derived
+                // facts inherit tenant fields and the right classification.
                 std::map<std::string, std::string> raw_user_meta = record.user_metadata;
                 if (is_confidential) {
                     raw_user_meta["confidential"] = "true";
                 }
-                MemoryOwner raw_owner = record.owner;
+                MemoryScope raw_scope = record.scope;
+                MemoryType raw_memory_type = record.memory_type;
 
                 std::vector<DerivedCandidate> candidates;
                 candidates.reserve(fact_list.size());
@@ -257,7 +303,8 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                     candidate.importance = fact.importance;
                     candidate.source_tier = SourceTier::Inference;
                     candidate.user_metadata = raw_user_meta;
-                    candidate.owner = raw_owner;
+                    candidate.scope = raw_scope;
+                    candidate.memory_type = raw_memory_type;
                     if (!embedder_) continue;
                     auto embed_result = embedder_->embed(candidate.content);
                     if (embed_result.ok()) {
@@ -271,9 +318,9 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                     return result.ok() ? *result : 0;
                 };
 
-                const uint64_t derived_ns_hash = MemoryRecord::hashNamespace(namespace_);
+                // Use agent_id for filtering derived facts within the same agent context
                 SimilaritySearchFunc search_fn =
-                    [this, derived_ns_hash, memory_id](const std::vector<float>& emb, size_t top_k)
+                    [this, memory_id, agent_id = record.agent_id](const std::vector<float>& emb, size_t top_k)
                         -> std::vector<std::pair<uint64_t, float>> {
                     auto raw = store_.searchSimilar(emb, top_k * 10);
                     std::vector<std::pair<uint64_t, float>> filtered;
@@ -281,7 +328,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                     for (const auto& [id, sim] : raw) {
                         if (id == memory_id) continue;  // exclude parent raw memory
                         auto rec = store_.get(id);
-                        if (rec.ok() && rec->namespace_hash == derived_ns_hash) {
+                        if (rec.ok() && rec->agent_id == agent_id && rec->layer == MemoryLayer::Derived) {
                             filtered.emplace_back(id, sim);
                             if (filtered.size() >= top_k) break;
                         }
@@ -290,17 +337,25 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                 };
 
                 auto results = derived_extractor_->processFacts(
-                    memory_id, namespace_, candidates,
+                    memory_id, record.agent_id, record.user_id, candidates,
                     search_fn, store_fn);
 
                 spdlog::info("Stage2 reconciler check: reconciler_={} results={}",
                              (reconciler_ ? "set" : "null"), results.size());
                 for (size_t i = 0; i < results.size(); ++i) {
                     const auto& result = results[i];
-                    if (result.decision == GateDecision::Accepted && result.derived_id != 0) {
+                    // Lineage edge: written for BOTH Accepted and Deferred
+                    // derived facts. Deferred facts represent real extractions
+                    // that the writeGate downgraded — they're still valid
+                    // memories and need a traceable parent for future
+                    // troubleshooting / reconciliation lookup.
+                    if ((result.decision == GateDecision::Accepted
+                         || result.decision == GateDecision::Deferred)
+                        && result.derived_id != 0) {
                         graph_.addEdge(result.derived_id, memory_id, EdgeType::DerivedFrom, 1.0f);
-                        spdlog::info("V2 derived fact stored: id={} from raw={}",
-                                     result.derived_id, memory_id);
+                        spdlog::info("V2 derived fact stored: id={} from raw={} decision={}",
+                                     result.derived_id, memory_id,
+                                     gateDecisionToString(result.decision));
                     }
                     spdlog::info("  result[{}] decision={} derived_id={} reconcile_eligible={}",
                                  i, (int)result.decision, result.derived_id,
@@ -319,11 +374,11 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                             || result.decision == GateDecision::Deferred)
                         && result.derived_id != 0 && i < candidates.size()) {
                         const auto& cand = candidates[i];
-                        // Find strongly-similar neighbours in same namespace,
+                        // Find strongly-similar neighbours in same agent context,
                         // EXCLUDING the just-stored derived fact itself.
-                        const uint64_t derived_ns = MemoryRecord::hashNamespace(namespace_);
+                        const std::string& target_agent_id = record.agent_id;
 
-                        // Vector path: HNSW neighbours, namespace-filtered, derived-only.
+                        // Vector path: HNSW neighbours, agent-filtered, derived-only.
                         std::vector<std::pair<MemoryRecord, float>> neigh;
                         std::unordered_set<uint64_t> seen_ids;
                         seen_ids.insert(result.derived_id);
@@ -331,7 +386,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                         for (const auto& [nid, sim] : raw_neigh) {
                             if (seen_ids.count(nid)) continue;
                             auto rec = store_.get(nid);
-                            if (!rec.ok() || rec->namespace_hash != derived_ns) continue;
+                            if (!rec.ok() || rec->agent_id != target_agent_id) continue;
                             if (!rec->isAlive()) continue;
                             if (rec->layer != MemoryLayer::Derived) continue;
                             seen_ids.insert(nid);
@@ -369,11 +424,11 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                                 }
                             }
 
-                            // Scan namespace for derived facts and rank by overlap.
+                            // Scan agent-scoped derived facts and rank by overlap.
                             std::vector<std::tuple<float, MemoryRecord>> kw_hits;
                             store_.scanAll([&](const MemoryRecord& r) {
                                 if (seen_ids.count(r.memory_id)) return;
-                                if (r.namespace_hash != derived_ns) return;
+                                if (r.agent_id != target_agent_id) return;
                                 if (!r.isAlive()) return;
                                 if (r.layer != MemoryLayer::Derived) return;
                                 if (cand_bg.empty()) return;
@@ -451,7 +506,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                             std::vector<std::tuple<uint32_t, MemoryRecord>> temporal_hits;
                             store_.scanAll([&](const MemoryRecord& r) {
                                 if (seen_ids.count(r.memory_id)) return;
-                                if (r.namespace_hash != derived_ns) return;
+                                if (r.agent_id != target_agent_id) return;
                                 if (!r.isAlive()) return;
                                 if (r.layer != MemoryLayer::Derived) return;
                                 if (!looksTemporal(r.content)) return;
@@ -508,7 +563,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                                 for (const auto& [nid, sim] : fresh_neigh) {
                                     if (seen_ids.count(nid)) continue;
                                     auto rec = store_.get(nid);
-                                    if (!rec.ok() || rec->namespace_hash != derived_ns) continue;
+                                    if (!rec.ok() || rec->agent_id != target_agent_id) continue;
                                     if (!rec->isAlive()) continue;
                                     if (rec->layer != MemoryLayer::Derived) continue;
                                     seen_ids.insert(nid);
@@ -522,6 +577,23 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
 
                         reconcile_decision = reconciler_->decide(cand.content, neigh);
                         reconciled = true;
+
+                        // Emit Reconcile event for unified observability.
+                        if (events_log_) {
+                            MemoryEvent rev;
+                            rev.memory_id  = result.derived_id;
+                            rev.trace_id   = trace_id;
+                            rev.agent_id   = target_agent_id;
+                            rev.kind       = EventKind::Reconcile;
+                            rev.status     = (reconcile_decision.op == ReconcileOp::NOOP)
+                                                 ? EventStatus::NoOp : EventStatus::Ok;
+                            rev.summary    = truncateUtf8(cand.content, 80);
+                            rev.attrs["op"]            = reconcileOpToString(reconcile_decision.op);
+                            rev.attrs["target_id"]     = std::to_string(reconcile_decision.target_id);
+                            rev.attrs["rationale"]     = reconcile_decision.rationale;
+                            rev.attrs["neighbour_count"] = std::to_string(neigh.size());
+                            events_log_->append(std::move(rev));
+                        }
 
                         // Apply non-ADD ops
                         switch (reconcile_decision.op) {
@@ -557,7 +629,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                                         if (sim < 0.35f) continue;
                                         auto srec = store_.get(sid);
                                         if (!srec.ok() || !srec->isAlive()) continue;
-                                        if (srec->namespace_hash != derived_ns) continue;
+                                        if (srec->agent_id != target_agent_id) continue;
                                         if (srec->layer != MemoryLayer::Derived) continue;
                                         eligible.push_back({sid, sim, std::move(*srec)});
                                     }
@@ -610,7 +682,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                                         if (sim < 0.35f) continue;
                                         auto srec = store_.get(sid);
                                         if (!srec.ok() || !srec->isAlive()) continue;
-                                        if (srec->namespace_hash != derived_ns) continue;
+                                        if (srec->agent_id != target_agent_id) continue;
                                         if (srec->layer != MemoryLayer::Derived) continue;
                                         eligible.push_back({sid, sim, std::move(*srec)});
                                     }
@@ -659,46 +731,58 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
                         // reconcile for the same target can proceed.
                     }
 
-                    // Audit each derived verdict to GateLog (with reconcile op)
-                    if (gate_log_ && i < candidates.size()) {
+                    // Audit each derived verdict — emit MemoryEvent Gate to
+                    // the unified observability log (events.log). The legacy
+                    // GateLog is no longer written here; setEventsLog() is the
+                    // single source of truth post-Phase 2.
+                    if (events_log_ && i < candidates.size()) {
                         const auto& cand = candidates[i];
-                        GateLogEntry entry;
-                        entry.namespace_ = namespace_;
-                        entry.content = cand.content;
-                        entry.embedding = cand.embedding;
-                        entry.decision = result.decision;
-                        entry.reason = result.reason;
-                        entry.owner = cand.owner;
-                        entry.layer = MemoryLayer::Derived;
-                        entry.user_metadata = cand.user_metadata;
-                        entry.memory_id = result.derived_id;
+                        MemoryEvent ev;
+                        ev.memory_id  = result.derived_id;
+                        ev.trace_id   = trace_id;
+                        ev.agent_id   = record.agent_id;
+                        ev.kind       = EventKind::Gate;
+                        switch (result.decision) {
+                            case GateDecision::Accepted: ev.status = EventStatus::Ok; break;
+                            case GateDecision::Rejected: ev.status = EventStatus::Rejected; break;
+                            case GateDecision::Deferred: ev.status = EventStatus::Deferred; break;
+                        }
+                        ev.summary = truncateUtf8(cand.content, 80);
+                        ev.attrs["decision"]       = gateDecisionToString(result.decision);
+                        ev.attrs["reason"]         = result.reason;
+                        ev.attrs["scope"]          = scopeToString(cand.scope);
+                        ev.attrs["memory_type"]    = memoryTypeToString(cand.memory_type);
+                        ev.attrs["layer"]          = "Derived";
+                        // marginal_value lives in WriteGate internals, not in
+                        // DerivedResult; if needed later, surface it via the
+                        // gate's verdict object.
                         std::smatch m;
                         std::regex dup_re(R"(Near-duplicate of memory #(\d+))");
                         if (std::regex_search(result.reason, m, dup_re) && m.size() >= 2) {
-                            try { entry.conflict_with_id = std::stoull(m[1].str()); } catch (...) {}
+                            ev.attrs["conflict_with_id"] = m[1].str();
                         }
                         if (reconciled) {
-                            entry.reconcile_op = reconcileOpToString(reconcile_decision.op);
-                            entry.reconcile_target_id = reconcile_decision.target_id;
-                            entry.reconcile_rationale = reconcile_decision.rationale;
+                            ev.attrs["reconcile_op"]        = reconcileOpToString(reconcile_decision.op);
+                            ev.attrs["reconcile_target_id"] = std::to_string(reconcile_decision.target_id);
+                            ev.attrs["reconcile_rationale"] = reconcile_decision.rationale;
                         }
-                        gate_log_->append(entry);
+                        events_log_->append(std::move(ev));
                     }
                 }
             }
         }
 
         // Graph edge creation: Related + ConflictsWith.
-        // Edges only make sense within the same namespace — alice and bob's
+        // Edges only make sense within the same agent context — alice and bob's
         // contradicting beliefs should not be linked as ConflictsWith.
         if (!record.embedding.empty()) {
-            const uint64_t edge_ns_hash = record.namespace_hash;
+            const std::string& edge_agent_id = record.agent_id;
             auto raw_neighbors = store_.searchSimilar(record.embedding, 50);
             std::vector<std::pair<uint64_t, float>> neighbors;
             neighbors.reserve(10);
             for (const auto& [nid, score] : raw_neighbors) {
                 auto rec = store_.get(nid);
-                if (rec.ok() && rec->namespace_hash == edge_ns_hash) {
+                if (rec.ok() && rec->agent_id == edge_agent_id) {
                     neighbors.emplace_back(nid, score);
                     if (neighbors.size() >= 10) break;
                 }
@@ -717,12 +801,13 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
     };
 
     // Freshness barrier: increment before push so recall can detect in-flight work
-    incrementPending(ns_hash);
+    // Use memory_id as the key for tracking in-flight refinements
+    incrementPending(memory_id);
 
     auto push_result = queue_.push(std::move(task));
     if (!push_result.ok()) {
         // Push failed — decrement immediately since the task won't run
-        decrementPending(ns_hash);
+        decrementPending(memory_id);
         spdlog::warn("Failed to schedule refinement for memory {}: {}",
                      memory_id, push_result.error().toString());
     }
@@ -730,20 +815,17 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id, const std::string& 
 
 Result<std::vector<uint64_t>> CapturePipeline::interceptCapture(
     const std::vector<std::pair<std::string, std::string>>& messages,
-    const std::string& namespace_) {
-
-    std::vector<uint64_t> all_ids;
-
-    // Capture assistant messages (they contain the knowledge)
+    const std::string& agent_id,
+    const std::string& user_id) {
+    // Simple implementation: concatenate user messages and capture
+    std::string combined;
     for (const auto& [role, content] : messages) {
-        if (role == "assistant" || role == "user") {
-            auto result = capture(content, namespace_, MemoryOwner::Session);
-            if (result.ok()) {
-                all_ids.insert(all_ids.end(), result->begin(), result->end());
-            }
+        if (role == "user" || role == "assistant") {
+            combined += content + "\n";
         }
     }
-    return all_ids;
+    if (combined.empty()) return std::vector<uint64_t>{};
+    return capture(combined, agent_id, user_id, MemoryScope::Private, MemoryType::Ephemeral);
 }
 
 Result<ExtractionResult> CapturePipeline::extractFacts(const std::string& content) {

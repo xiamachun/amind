@@ -5,17 +5,12 @@ namespace amind {
 MetaCognition::MetaCognition(MemoryStore& store, GraphStore& graph)
     : store_(store), graph_(graph) {}
 
-CoverageStats MetaCognition::getCoverage(const std::string& namespace_) const {
+CoverageStats MetaCognition::getCoverage(const std::string& agent_id) const {
     CoverageStats stats;
     stats.last_updated = MemoryRecord::currentTimeSec();
 
-    uint64_t filter_hash = 0;
-    if (!namespace_.empty()) {
-        filter_hash = MemoryRecord::hashNamespace(namespace_);
-    }
-
     store_.scanAll([&](const MemoryRecord& rec) {
-        if (filter_hash != 0 && rec.namespace_hash != filter_hash) return;
+        if (!agent_id.empty() && rec.agent_id != agent_id) return;
 
         stats.total++;
 
@@ -23,17 +18,17 @@ CoverageStats MetaCognition::getCoverage(const std::string& namespace_) const {
             stats.active++;
         }
 
-        if (rec.confidence == Confidence::Stale) {
+        if (rec.confidence_level == Confidence::Stale) {
             stats.stale++;
         }
 
-        if (rec.confidence == Confidence::Conflicted) {
+        if (rec.confidence_level == Confidence::Conflicted) {
             stats.conflicted++;
         }
 
-        // Topic distribution by owner
-        std::string owner_key = ownerToString(rec.owner);
-        stats.topic_distribution[owner_key]++;
+        // Topic distribution by memory type
+        std::string type_key = memoryTypeToString(rec.memory_type);
+        stats.topic_distribution[type_key]++;
     });
 
     return stats;
@@ -58,7 +53,7 @@ std::vector<uint64_t> MetaCognition::getStaleMemories() const {
     std::vector<uint64_t> stale_ids;
 
     store_.scanAll([&](const MemoryRecord& rec) {
-        if (rec.confidence == Confidence::Stale && rec.phase == MemoryPhase::Active) {
+        if (rec.confidence_level == Confidence::Stale && rec.phase == MemoryPhase::Active) {
             stale_ids.push_back(rec.memory_id);
         }
     });

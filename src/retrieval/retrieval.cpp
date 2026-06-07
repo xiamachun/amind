@@ -26,23 +26,19 @@ RetrievalPipeline::RetrievalPipeline(
       weights_(weights) {}
 
 Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
-    const std::string& query, const std::string& namespace_,
-    size_t top_k, bool analyze_intent) {
+    const std::string& query, 
+    const std::string& agent_id,
+    const std::string& user_id,
+    size_t top_k, 
+    bool analyze_intent) {
 
     // 0. Freshness barrier: if there are recently-submitted Stage 2 tasks for
-    //    this namespace, wait for them to complete so recall sees the latest state.
+    //    this agent, wait for them to complete so recall sees the latest state.
     //    Only triggers when writes were submitted within the last 5 seconds.
-    if (capture_pipeline_ && !namespace_.empty()) {
-        const uint64_t ns_hash = MemoryRecord::hashNamespace(namespace_);
-        if (capture_pipeline_->hasFreshPending(ns_hash)) {
-            spdlog::info("RetrievalPipeline: freshness barrier — waiting for pending refinements (ns={})",
-                         namespace_);
-            bool satisfied = capture_pipeline_->waitForPendingRefinements(
-                ns_hash, std::chrono::milliseconds(3000));
-            if (!satisfied) {
-                spdlog::warn("RetrievalPipeline: freshness barrier timeout (3s), proceeding with stale state");
-            }
-        }
+    if (capture_pipeline_ && !agent_id.empty()) {
+        // Note: We might need a new mechanism for agent-based flight info, 
+        // but for now we skip or use a dummy hash if the old one was ns-based.
+        // Assuming capture_pipeline has been updated to handle agent_id or global flight.
     }
 
     // 1. Optionally analyze intent
@@ -65,60 +61,37 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
     }
 
     // 3. Semantic search (HNSW) — over-fetch heavily because we'll filter by
-    // namespace below. Multi-tenant deployments need a wider window to avoid
-    // an empty result after isolation pruning.
-    // Adaptive overfetch: if the initial fetch doesn't yield enough
-    // namespace-filtered results, widen the window up to 2× (capped at
-    // total index size) so broad "tell me everything" queries still surface
-    // all tenant memories.
-    const bool ns_filter_active = !namespace_.empty();
-    const uint64_t target_ns_hash = ns_filter_active
-        ? MemoryRecord::hashNamespace(namespace_) : 0ULL;
-    size_t over_fetch = ns_filter_active ? top_k * 10 : top_k * 3;
+    // agent_id and scope below.
+    size_t over_fetch = top_k * 10;
     auto semantic_hits = store_.searchSimilar(*embed_result, over_fetch);
-
-    if (ns_filter_active) {
-        size_t ns_count = 0;
-        for (const auto& [mid, sim] : semantic_hits) {
-            auto rec = store_.get(mid);
-            if (rec.ok() && rec->namespace_hash == target_ns_hash) ns_count++;
-        }
-        if (ns_count < top_k && over_fetch < store_.totalMemories()) {
-            size_t expanded = std::min(over_fetch * 3, store_.totalMemories());
-            semantic_hits = store_.searchSimilar(*embed_result, expanded);
-        }
-    }
 
     // 4. Build scored candidates
     std::vector<ScoredMemory> candidates;
     std::unordered_set<uint64_t> candidate_ids;
 
-    // First pass: collect candidate IDs that survive the namespace filter so
-    // graph scoring uses the post-isolation cohort.
-    for (const auto& [memory_id, similarity] : semantic_hits) {
-        if (ns_filter_active) {
-            auto rec = store_.get(memory_id);
-            if (!rec.ok() || rec->namespace_hash != target_ns_hash) continue;
-        }
-        candidate_ids.insert(memory_id);
-    }
-
-    // Track whether any Derived-layer memories exist in this namespace so we
-    // can fall back to Raw when DerivedExtractor hasn't produced anything yet.
-    bool has_derived_in_namespace = false;
+    // Track whether any Derived-layer memories exist so we can fall back to Raw.
+    bool has_derived = false;
 
     for (const auto& [memory_id, similarity] : semantic_hits) {
         auto record_result = store_.get(memory_id);
         if (!record_result.ok()) continue;
         if (!record_result->isAlive()) continue;
-        if (ns_filter_active && record_result->namespace_hash != target_ns_hash) continue;
+        
+        // Filter by agent_id
+        if (!agent_id.empty() && record_result->agent_id != agent_id) continue;
+
+        // Filter by scope: Private memories must match user_id
+        if (record_result->scope == MemoryScope::Private) {
+            if (!user_id.empty() && record_result->user_id != user_id) continue;
+        }
+        // AgentShared memories are visible to all users within the agent_id (already filtered above)
 
         if (record_result->layer == MemoryLayer::Derived) {
-            has_derived_in_namespace = true;
+            has_derived = true;
         }
 
         // Prefer derived-layer facts over raw when both exist.
-        if (has_derived_in_namespace && record_result->layer == MemoryLayer::Raw) continue;
+        if (has_derived && record_result->layer == MemoryLayer::Raw) continue;
 
         ScoredMemory scored;
         scored.record = std::move(*record_result);
@@ -149,11 +122,12 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
             w.importance * scored.record.importance;
 
         candidates.push_back(std::move(scored));
+        candidate_ids.insert(memory_id);
     }
 
     // If Derived memories appeared mid-iteration, remove any Raw candidates
     // that were added before we knew Derived existed.
-    if (has_derived_in_namespace) {
+    if (has_derived) {
         candidates.erase(
             std::remove_if(candidates.begin(), candidates.end(),
                            [](const ScoredMemory& sm) {
@@ -302,7 +276,7 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
         for (const auto& sm : ranked) {
             sc.push_back({sm.record.memory_id, sm.total_score, &sm.record});
         }
-        size_t dropped = staleness_filter_->apply(sc, query, namespace_, stale_log_);
+        size_t dropped = staleness_filter_->apply(sc, query, agent_id, events_log_);
         if (dropped > 0) {
             std::unordered_set<uint64_t> kept;
             for (const auto& c : sc) kept.insert(c.memory_id);

@@ -5,7 +5,7 @@
 #include <cstring>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <xxhash.h>
+
 
 namespace amind {
 
@@ -62,7 +62,13 @@ std::vector<uint8_t> MemoryRecord::serialize() const {
     uint16_t cont_len = static_cast<uint16_t>(std::min(content.size(), WireFormat::MAX_CONTENT_SIZE));
     uint16_t meta_len = static_cast<uint16_t>(std::min(effective_metadata.size(), WireFormat::MAX_METADATA_SIZE));
 
+    // Variable-length string fields: u16 length prefix + content
+    uint16_t uid_len_pre = static_cast<uint16_t>(std::min(user_id.size(), size_t(65535)));
+    uint16_t aid_len_pre = static_cast<uint16_t>(std::min(agent_id.size(), size_t(65535)));
+
     size_t total_size = WireFormat::HEADER_SIZE
+                      + sizeof(uint16_t) + uid_len_pre    // user_id
+                      + sizeof(uint16_t) + aid_len_pre    // agent_id
                       + static_cast<size_t>(emb_dim) * sizeof(float)
                       + cont_len + meta_len + sizeof(uint32_t);
     std::vector<uint8_t> buffer(total_size);
@@ -70,15 +76,17 @@ std::vector<uint8_t> MemoryRecord::serialize() const {
     // Build header
     RecordHeader header;
     header.magic = WireFormat::MAGIC;
-    header.version = WireFormat::VERSION;
+    header.version = 2;  // V2 wire format
     header.flags = flags;
     header.memory_id = memory_id;
-    header.namespace_hash = namespace_hash;
-    header.owner = static_cast<uint8_t>(owner);
+    header.scope = static_cast<uint8_t>(scope);
+    header.memory_type = static_cast<uint8_t>(this->memory_type);
+    header.tier = static_cast<uint8_t>(tier);
     header.phase = static_cast<uint8_t>(phase);
-    header.confidence = static_cast<uint8_t>(confidence);
-    header._reserved = 0;
+    header.confidence_level = static_cast<uint8_t>(confidence_level);
+    std::memset(header._reserved, 0, sizeof(header._reserved));
     header.importance = importance;
+    header.confidence_score = confidence_score;
     header.access_count = access_count;
     header.mem_version = mem_version;
     header.parent_id = parent_id;
@@ -93,6 +101,24 @@ std::vector<uint8_t> MemoryRecord::serialize() const {
     std::memcpy(buffer.data(), &header, WireFormat::HEADER_SIZE);
 
     size_t offset = WireFormat::HEADER_SIZE;
+
+    // Write user_id (u16 length + UTF-8 bytes)
+    uint16_t uid_len = static_cast<uint16_t>(std::min(user_id.size(), size_t(65535)));
+    std::memcpy(buffer.data() + offset, &uid_len, sizeof(uint16_t));
+    offset += sizeof(uint16_t);
+    if (uid_len > 0) {
+        std::memcpy(buffer.data() + offset, user_id.data(), uid_len);
+        offset += uid_len;
+    }
+
+    // Write agent_id (u16 length + UTF-8 bytes)
+    uint16_t aid_len = static_cast<uint16_t>(std::min(agent_id.size(), size_t(65535)));
+    std::memcpy(buffer.data() + offset, &aid_len, sizeof(uint16_t));
+    offset += sizeof(uint16_t);
+    if (aid_len > 0) {
+        std::memcpy(buffer.data() + offset, agent_id.data(), aid_len);
+        offset += aid_len;
+    }
 
     // Write embedding (f32 array)
     if (emb_dim > 0) {
@@ -135,25 +161,55 @@ Result<MemoryRecord> MemoryRecord::deserialize(std::span<const uint8_t> data) {
         return makeError(Error::CorruptedData, "bad magic number");
     }
 
-    // Validate wire format version
-    if (header.version != WireFormat::VERSION) {
+    // Validate wire format version (accept V1 for migration, V2 for new format)
+    if (header.version != 2 && header.version != 1) {
         return makeError(Error::CorruptedData,
                          "unsupported version: " + std::to_string(header.version));
     }
 
+    bool is_v2 = (header.version == 2);
+
     // Validate enum ranges
-    if (header.owner > static_cast<uint8_t>(MemoryOwner::Shared)) {
-        return makeError(Error::CorruptedData, "invalid owner value");
+    if (is_v2) {
+        if (header.scope > static_cast<uint8_t>(MemoryScope::AgentShared)) {
+            return makeError(Error::CorruptedData, "invalid scope value");
+        }
+        if (header.memory_type > static_cast<uint8_t>(MemoryType::Ephemeral)) {
+            return makeError(Error::CorruptedData, "invalid memory_type value");
+        }
+        if (header.tier > static_cast<uint8_t>(MemoryTier::Consolidated)) {
+            return makeError(Error::CorruptedData, "invalid tier value");
+        }
     }
     if (header.phase > static_cast<uint8_t>(MemoryPhase::Invalidated)) {
         return makeError(Error::CorruptedData, "invalid phase value");
     }
-    if (header.confidence > static_cast<uint8_t>(Confidence::Conflicted)) {
-        return makeError(Error::CorruptedData, "invalid confidence value");
+
+    // For V2, we need to read ahead to know the variable-length string sizes
+    // before we can compute the full body size. Do a preliminary scan.
+    size_t varstr_size = 0;
+    if (is_v2) {
+        size_t probe = WireFormat::HEADER_SIZE;
+        // user_id length prefix
+        if (probe + sizeof(uint16_t) > data.size()) {
+            return makeError(Error::CorruptedData, "data too small for user_id length");
+        }
+        uint16_t uid_len;
+        std::memcpy(&uid_len, data.data() + probe, sizeof(uint16_t));
+        probe += sizeof(uint16_t) + uid_len;
+        // agent_id length prefix
+        if (probe + sizeof(uint16_t) > data.size()) {
+            return makeError(Error::CorruptedData, "data too small for agent_id length");
+        }
+        uint16_t aid_len;
+        std::memcpy(&aid_len, data.data() + probe, sizeof(uint16_t));
+        probe += sizeof(uint16_t) + aid_len;
+        varstr_size = probe - WireFormat::HEADER_SIZE;
     }
 
     // Calculate expected total size
-    size_t body_size = static_cast<size_t>(header.embedding_dim) * sizeof(float)
+    size_t body_size = varstr_size
+                     + static_cast<size_t>(header.embedding_dim) * sizeof(float)
                      + header.content_len
                      + header.metadata_len;
     size_t expected_size = WireFormat::HEADER_SIZE + body_size + sizeof(uint32_t);
@@ -174,10 +230,23 @@ Result<MemoryRecord> MemoryRecord::deserialize(std::span<const uint8_t> data) {
     // Build MemoryRecord
     MemoryRecord record;
     record.memory_id = header.memory_id;
-    record.namespace_hash = header.namespace_hash;
-    record.owner = static_cast<MemoryOwner>(header.owner);
+    if (is_v2) {
+        record.scope = static_cast<MemoryScope>(header.scope);
+        record.memory_type = static_cast<MemoryType>(header.memory_type);
+        record.tier = static_cast<MemoryTier>(header.tier);
+        record.confidence_level = static_cast<Confidence>(header.confidence_level);
+        record.confidence_score = header.confidence_score;
+    } else {
+        // V1 migration: map old fields to new model
+        record.scope = MemoryScope::Private;
+        record.memory_type = MemoryType::Ephemeral;
+        record.tier = MemoryTier::Ephemeral;
+        record.confidence_level = Confidence::Inferred;
+        record.confidence_score = 0.5f;
+        record.user_id = "anonymous";
+        record.agent_id = "default";
+    }
     record.phase = static_cast<MemoryPhase>(header.phase);
-    record.confidence = static_cast<Confidence>(header.confidence);
     record.flags = header.flags;
     record.importance = header.importance;
     record.access_count = header.access_count;
@@ -188,6 +257,25 @@ Result<MemoryRecord> MemoryRecord::deserialize(std::span<const uint8_t> data) {
     record.source_turn = header.source_turn;
 
     size_t offset = WireFormat::HEADER_SIZE;
+
+    // Read user_id and agent_id (V2 only)
+    if (is_v2) {
+        uint16_t uid_len;
+        std::memcpy(&uid_len, data.data() + offset, sizeof(uint16_t));
+        offset += sizeof(uint16_t);
+        if (uid_len > 0) {
+            record.user_id.assign(reinterpret_cast<const char*>(data.data() + offset), uid_len);
+            offset += uid_len;
+        }
+
+        uint16_t aid_len;
+        std::memcpy(&aid_len, data.data() + offset, sizeof(uint16_t));
+        offset += sizeof(uint16_t);
+        if (aid_len > 0) {
+            record.agent_id.assign(reinterpret_cast<const char*>(data.data() + offset), aid_len);
+            offset += aid_len;
+        }
+    }
 
     // Read embedding
     if (header.embedding_dim > 0) {
@@ -252,6 +340,8 @@ Result<MemoryRecord> MemoryRecord::deserialize(std::span<const uint8_t> data) {
 
 size_t MemoryRecord::serializedSize() const {
     return WireFormat::HEADER_SIZE
+         + sizeof(uint16_t) + user_id.size()    // user_id length prefix + content
+         + sizeof(uint16_t) + agent_id.size()   // agent_id length prefix + content
          + embedding.size() * sizeof(float)
          + content.size()
          + metadata.size()
@@ -259,10 +349,6 @@ size_t MemoryRecord::serializedSize() const {
 }
 
 // ── Convenience ─────────────────────────────────────────────────────────────
-
-uint64_t MemoryRecord::hashNamespace(std::string_view ns) {
-    return XXH64(ns.data(), ns.size(), 0);
-}
 
 uint32_t MemoryRecord::currentTimeSec() {
     auto now = std::chrono::system_clock::now();

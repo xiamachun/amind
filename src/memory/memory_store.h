@@ -68,9 +68,6 @@ public:
     /// Archive a memory (Active → Archived, no cascade).
     Result<void, Error> archive(uint64_t memory_id);
 
-    /// Bulk soft-delete all memories in a namespace. Returns deleted IDs.
-    std::vector<uint64_t> removeByNamespace(uint64_t namespace_hash);
-
     /// Get version history chain for a memory.
     Result<std::vector<MemoryRecord>> getHistory(uint64_t memory_id, int max_depth = 10);
 
@@ -99,11 +96,13 @@ public:
     struct ListFilter {
         int page{1};
         int per_page{50};
-        std::string owner_filter;      // empty = all
-        std::string phase_filter;      // empty = all
-        std::string query;             // keyword substring search
-        std::string namespace_filter;  // empty = all; hashed and compared to namespace_hash
-        std::string user_id_filter;    // empty = all; matches user_metadata["user_id"]
+        std::string scope_filter;          // empty = all
+        std::string memory_type_filter;    // empty = all
+        std::string phase_filter;          // empty = all
+        std::string query;                 // keyword substring search
+        std::string user_id_filter;        // empty = all; matches user_metadata["user_id"]
+        std::string layer_filter;          // "Raw" | "Derived" | empty=all
+        bool include_tombstone{false};     // when true, return Tombstoned records too
     };
     struct ListResult {
         std::vector<MemoryRecord> records;
@@ -126,15 +125,6 @@ public:
     /// Flush to disk.
     void flush();
 
-    /// Register a namespace string against its hash. Cheap, idempotent, used
-    /// to power reverse-lookup in audit views (Forget Log, etc.).
-    void registerNamespaceString(const std::string& namespace_string);
-
-    /// Look up the original namespace string for a hash. Returns empty if
-    /// the hash hasn't been registered (e.g. memories created before this
-    /// process started; still recoverable next time the namespace is touched).
-    std::string namespaceFromHash(uint64_t namespace_hash) const;
-
     // ── Dynamic variable setters (thread-safe) ──
     void setConflictThreshold(float v) { std::unique_lock lk(mutex_); config_.conflict_similarity_threshold = v; }
     void setDecayRate(float v) { std::unique_lock lk(mutex_); config_.decay_rate = v; }
@@ -151,12 +141,6 @@ private:
 
     // In-memory index: memory_id → MemoryRecord (hot cache)
     std::unordered_map<uint64_t, MemoryRecord> cache_;
-
-    // Reverse map: namespace_hash → original namespace string. Populated by
-    // capture_pipeline at write time (and on demand by the WebUI / admin paths)
-    // so the Forget Log can render human-readable namespaces instead of hex.
-    mutable std::shared_mutex ns_mutex_;
-    std::unordered_map<uint64_t, std::string> ns_strings_;
 
     void evictIfNeeded();
 };

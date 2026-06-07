@@ -1,7 +1,6 @@
 
 add_library(amind_forget STATIC
     forget_engine.cpp
-    forget_log.cpp
 )
 
 target_include_directories(amind_forget

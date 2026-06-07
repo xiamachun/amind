@@ -33,8 +33,8 @@ class MetaCognition {
 public:
     MetaCognition(MemoryStore& store, GraphStore& graph);
 
-    /// Get coverage statistics for a namespace (tenant isolation unit).
-    CoverageStats getCoverage(const std::string& namespace_) const;
+    /// Get coverage statistics for an agent.
+    CoverageStats getCoverage(const std::string& agent_id) const;
 
     /// Get list of active conflicts.
     std::vector<ConflictInfo> getConflicts() const;

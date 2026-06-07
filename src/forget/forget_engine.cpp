@@ -1,22 +1,13 @@
 
 #include "forget_engine.h"
-#include "forget_log.h"
 
 #include <algorithm>
-#include <iterator>
 #include <spdlog/spdlog.h>
 
 namespace amind {
 
 ForgetEngine::ForgetEngine(ForgetConfig config)
     : config_(std::move(config)) {}
-
-ForgetEngine::ForgetEngine(ForgetConfig config, const std::string& data_dir)
-    : config_(std::move(config)),
-      persistent_log_(std::make_unique<ForgetLog>(data_dir)) {
-    persistent_log_->open();
-    persistent_log_->replay();
-}
 
 ForgetEngine::~ForgetEngine() = default;
 
@@ -86,46 +77,9 @@ std::vector<GcEvaluation> ForgetEngine::runCycle(
     return results;
 }
 
-// ── ForgetLog ────────────────────────────────────────────────────────────
-
-void ForgetEngine::logEntry(ForgetLogEntry entry) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (persistent_log_) {
-        persistent_log_->append(entry);
-    }
-    log_.push_back(std::move(entry));
-}
-
-std::vector<ForgetLogEntry> ForgetEngine::getLog() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return log_;
-}
-
-std::vector<ForgetLogEntry> ForgetEngine::recentEntries(size_t limit) const {
-    if (persistent_log_) {
-        // persistent_log_ has its own mutex — call without holding ours.
-        auto entries = persistent_log_->recentEntries();
-        if (entries.size() > limit) {
-            entries.erase(entries.begin(),
-                          entries.begin() + (entries.size() - limit));
-        }
-        return entries;
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (log_.size() <= limit) return log_;
-    return std::vector<ForgetLogEntry>(log_.end() - static_cast<std::ptrdiff_t>(limit),
-                                       log_.end());
-}
-
-void ForgetEngine::clearLog() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    log_.clear();
-}
-
-size_t ForgetEngine::logSize() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return log_.size();
-}
+// logEntry / getLog / recentEntries / clearLog / logSize removed in Phase 4.
+// GC decisions are emitted as MemoryEvent{kind=Gc*} from runForgetCycleOnce()
+// in src/server/engine.cpp instead.
 
 // ── Config ───────────────────────────────────────────────────────────────
 

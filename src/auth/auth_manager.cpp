@@ -75,8 +75,9 @@ Result<std::string> AuthManager::createKey(const std::string& label) {
 
     MemoryRecord record;
     record.content = CONTENT_PREFIX + meta.dump();
-    record.owner = MemoryOwner::Agent;
-    record.confidence = Confidence::Verified;
+    record.scope = MemoryScope::AgentShared;
+    record.memory_type = MemoryType::DomainKnowledge;
+    record.confidence_level = Confidence::Verified;
     record.importance = 0.0f;
 
     auto result = store_.fastStore(std::move(record));

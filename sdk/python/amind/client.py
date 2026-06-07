@@ -109,14 +109,18 @@ class AmindClient:
     def store(
         self,
         content: str,
-        namespace: str = "default",
-        owner: str = "user",
+        agent_id: str = "default",
+        user_id: str = "anonymous",
+        scope: str = "private",
+        memory_type: str = "ephemeral",
         metadata: dict | None = None,
     ) -> StoreResponse:
         payload: dict[str, Any] = {
             "content": content,
-            "namespace": namespace,
-            "owner": owner,
+            "agent_id": agent_id,
+            "user_id": user_id,
+            "scope": scope,
+            "memory_type": memory_type,
         }
         if metadata:
             payload["metadata"] = metadata
@@ -126,14 +130,20 @@ class AmindClient:
     def recall(
         self,
         query: str,
-        namespace: str = "default",
+        agent_id: str = "default",
+        user_id: str = "anonymous",
+        scope: str = "private",
+        memory_type: str = "ephemeral",
         top_k: int = 10,
         filters: dict | None = None,
         fast: bool = False,
     ) -> list[ScoredMemory]:
         payload: dict[str, Any] = {
             "query": query,
-            "namespace": namespace,
+            "agent_id": agent_id,
+            "user_id": user_id,
+            "scope": scope,
+            "memory_type": memory_type,
             "top_k": top_k,
         }
         if filters:
@@ -164,13 +174,22 @@ class AmindClient:
         self,
         page: int = 1,
         per_page: int = 50,
-        owner: str | None = None,
+        agent_id: str | None = None,
+        user_id: str | None = None,
+        scope: str | None = None,
+        memory_type: str | None = None,
         phase: str | None = None,
         query: str | None = None,
     ) -> ListMemoriesResponse:
         params: dict[str, str] = {"page": str(page), "per_page": str(per_page)}
-        if owner:
-            params["owner"] = owner
+        if agent_id:
+            params["agent_id"] = agent_id
+        if user_id:
+            params["user_id"] = user_id
+        if scope:
+            params["scope"] = scope
+        if memory_type:
+            params["memory_type"] = memory_type
         if phase:
             params["phase"] = phase
         if query:
@@ -183,7 +202,8 @@ class AmindClient:
     def intercept(
         self,
         messages: list[Message] | list[dict[str, str]],
-        namespace: str = "default",
+        agent_id: str = "default",
+        user_id: str = "anonymous",
     ) -> InterceptResponse:
         msg_dicts = [
             m.model_dump() if isinstance(m, Message) else m
@@ -191,15 +211,17 @@ class AmindClient:
         ]
         data = self._request("POST", "/v1/intercept", json={
             "messages": msg_dicts,
-            "namespace": namespace,
+            "agent_id": agent_id,
+            "user_id": user_id,
         })
         return InterceptResponse(**data)
 
     # ── Sessions ─────────────────────────────────────────────────────────────
 
-    def session_start(self, namespace: str = "default") -> SessionResponse:
+    def session_start(self, agent_id: str = "default", user_id: str = "anonymous") -> SessionResponse:
         data = self._request("POST", "/v1/sessions/start", json={
-            "namespace": namespace,
+            "agent_id": agent_id,
+            "user_id": user_id,
         })
         return SessionResponse(**data)
 
@@ -233,8 +255,8 @@ class AmindClient:
         data = self._request("GET", "/v1/metacognition/conflicts")
         return [Conflict(**c) for c in data] if isinstance(data, list) else []
 
-    def coverage(self, namespace: str = "") -> CoverageStats:
-        params = {"namespace": namespace} if namespace else {}
+    def coverage(self, agent_id: str = "") -> CoverageStats:
+        params = {"agent_id": agent_id} if agent_id else {}
         data = self._request("GET", "/v1/metacognition/coverage", params=params)
         return CoverageStats(**data)
 

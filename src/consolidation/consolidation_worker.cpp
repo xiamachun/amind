@@ -27,9 +27,11 @@ std::vector<uint64_t> ConsolidationWorker::promoteTopK(
 
     for (size_t i = 0; i < promote_count; ++i) {
         auto& record = session_memories[i];
-        if (record.confidence == Confidence::Inferred) {
-            record.owner = MemoryOwner::User;
-            record.confidence = Confidence::Verified;
+        if (record.confidence_level == Confidence::Inferred) {
+            record.scope = MemoryScope::Private;
+            record.memory_type = MemoryType::UserProfile;
+            record.tier = MemoryTier::Consolidated;
+            record.confidence_level = Confidence::Verified;
             promoted_ids.push_back(record.memory_id);
         }
     }

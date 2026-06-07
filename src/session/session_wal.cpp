@@ -38,7 +38,8 @@ void SessionWAL::appendStart(const Session& session) {
     json j;
     j["op"] = "start";
     j["session_id"] = session.session_id;
-    j["namespace"] = session.namespace_;
+    j["agent_id"] = session.agent_id;
+    j["user_id"] = session.user_id;
     j["started_at"] = session.started_at;
     writeLine(j.dump());
 }
@@ -80,7 +81,8 @@ std::unordered_map<uint64_t, Session> SessionWAL::replay() {
             if (op == "start") {
                 Session s;
                 s.session_id = j["session_id"].get<uint64_t>();
-                s.namespace_ = j.value("namespace", "");
+                s.agent_id = j.value("agent_id", j.value("namespace", "default"));
+                s.user_id = j.value("user_id", "anonymous");
                 s.started_at = j.value("started_at", 0u);
                 s.last_turn_at = s.started_at;
                 s.active = true;

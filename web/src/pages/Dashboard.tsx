@@ -50,7 +50,7 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-          <h3 className="text-sm font-medium text-gray-400 mb-4">Memories by Owner</h3>
+          <h3 className="text-sm font-medium text-gray-400 mb-4">Memories by Scope</h3>
           <ResponsiveContainer width="100%" height={260}>
             <PieChart>
               <Pie data={ownerData} dataKey="value" nameKey="name" cx="50%" cy="50%"

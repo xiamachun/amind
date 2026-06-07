@@ -18,7 +18,7 @@ target_link_libraries(amind_capture
         amind_provider
         amind_async
         amind_gate
-        amind_gate_log
+        amind_observability
         amind_reconcile
         amind_lineage
         amind_config

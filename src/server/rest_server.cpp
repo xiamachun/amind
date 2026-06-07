@@ -4,8 +4,8 @@
 #include "coordinator/remove_coordinator.h"
 #include "lineage/lineage_index.h"
 #include "forget/forget_engine.h"
+#include "observability/memory_event_log.h"
 #include "retrieval/staleness_filter.h"
-#include "gate_log/gate_log.h"
 #include "reconcile/reconciler.h"
 #include "gate/write_gate.h"
 
@@ -220,7 +220,6 @@ void RestServer::handleClient(int client_fd) {
     if (body_offset < request.size()) {
         body = request.substr(body_offset);
     }
-
     // Auth check (before routing)
     std::string headers_section = request.substr(0, header_end);
     auto auth_err = checkAuth(headers_section, path);
@@ -253,8 +252,8 @@ std::string RestServer::routeRequest(const std::string& method, const std::strin
     // Health / metrics / pipeline
     if (method == "GET" && clean_path == "/v1/health") return handleHealth();
     if (method == "GET" && clean_path == "/v1/metrics") return handleMetrics();
-    if (method == "GET" && clean_path == "/v1/pipeline/stats") return handlePipelineStats();
-    if (method == "GET" && clean_path == "/v1/pipeline/reconcile-log") return handleReconcileLog(path);
+    // /v1/pipeline/stats and /v1/pipeline/reconcile-log removed in Phase 4 —
+    // use /v1/events?kind=Reconcile and /v1/events/stats instead.
 
     // Memory CRUD
     if (method == "POST" && clean_path == "/v1/memories") return handleStore(body);
@@ -293,10 +292,18 @@ std::string RestServer::routeRequest(const std::string& method, const std::strin
         return handleRevokeKey(key_id);
     }
 
-    // Namespace bulk delete (must be before dynamic /v1/memories/{id} handler)
-    if (method == "DELETE" && clean_path.find("/v1/memories/namespace/") == 0) {
-        auto ns = urlDecode(clean_path.substr(23));
-        return handleDeleteNamespace(ns);
+    // Agent memory bulk delete (must be before dynamic /v1/memories/{id} handler)
+    if (method == "DELETE" && clean_path.find("/v1/memories/agent/") == 0) {
+        auto agent_id = urlDecode(clean_path.substr(19));
+        return handleDeleteAgentMemories(agent_id);
+    }
+
+    // Agent Management Endpoints
+    if (method == "POST" && clean_path == "/v1/agents") return handleRegisterAgent(body);
+    if (method == "GET" && clean_path == "/v1/agents") return handleListAgents();
+    if (method == "DELETE" && clean_path.find("/v1/agents/") == 0) {
+        auto agent_id = urlDecode(clean_path.substr(11));
+        return handleUnregisterAgent(agent_id);
     }
 
     // WebUI: list (must be before dynamic path handlers)
@@ -307,22 +314,21 @@ std::string RestServer::routeRequest(const std::string& method, const std::strin
         return handleCoverageStats(extractQueryParam(path, "namespace"));
     }
 
-    // Gate log audit
-    if (method == "GET" && clean_path == "/v1/gate/log") return handleGateLogList(path);
-    if (method == "GET" && clean_path == "/v1/gate/log/stats") return handleGateLogStats(path);
-    if (clean_path.find("/v1/gate/log/") == 0) {
-        auto rest = clean_path.substr(std::string("/v1/gate/log/").size());
-        auto slash = rest.find('/');
-        std::string id_str = (slash != std::string::npos) ? rest.substr(0, slash) : rest;
-        std::string sub = (slash != std::string::npos) ? rest.substr(slash) : "";
-        if (method == "POST" && sub == "/resurrect") {
-            return handleGateLogResurrect(id_str, body);
-        }
-    }
+    // Legacy /v1/gate/log* /v1/forget/log /v1/recall/stale-log routes removed
+    // in Phase 4. All observability now flows through the unified endpoints
+    // below, and resurrect goes through POST /v1/admin/resurrect/{event_id}.
 
-    // Forget log audit (read-only)
-    if (method == "GET" && clean_path == "/v1/forget/log") return handleForgetLog(path);
-    if (method == "GET" && clean_path == "/v1/recall/stale-log") return handleRecallStaleLog(path);
+    // Unified observability — Memory Event Log
+    if (method == "GET"  && clean_path == "/v1/events")        return handleEventsQuery(path);
+    if (method == "GET"  && clean_path == "/v1/events/stats")  return handleEventsStats(path);
+    if (method == "GET"  && clean_path.find("/v1/traces/") == 0) {
+        return handleTraceById(clean_path.substr(std::string("/v1/traces/").size()));
+    }
+    if (method == "POST" && clean_path.find("/v1/admin/resurrect/") == 0) {
+        return handleAdminResurrect(
+            clean_path.substr(std::string("/v1/admin/resurrect/").size()), body);
+    }
+    // memory/{id}/trace handled within the existing /v1/memories/{id} block below
 
     // Manual triggers for V2 background workers
     if (method == "POST" && clean_path == "/v1/admin/forget/run") return handleAdminForgetRun();
@@ -337,6 +343,7 @@ std::string RestServer::routeRequest(const std::string& method, const std::strin
 
         if (method == "GET" && sub_path.empty()) return handleGetMemory(id_str);
         if (method == "GET" && sub_path == "/history") return handleGetHistory(id_str);
+        if (method == "GET" && sub_path == "/trace") return handleMemoryTrace(id_str);
         if (method == "POST" && sub_path == "/feedback") return handleFeedback(id_str, body);
         if (method == "DELETE" && sub_path.empty()) return handleDeleteMemory(id_str);
         if (method == "POST" && sub_path == "/archive") return handleArchiveMemory(id_str);
@@ -356,10 +363,15 @@ std::string RestServer::routeRequest(const std::string& method, const std::strin
 
 
 
-    // WebUI: graph neighbors
+    // WebUI: graph neighbors. Pass the full path so the handler can parse
+    // optional flags (e.g. ?include_incoming=1) from the query string.
     if (method == "GET" && clean_path.find("/v1/graph/neighbors/") == 0) {
         auto id_str = clean_path.substr(20);
-        return handleGraphNeighbors(id_str);
+        bool include_incoming = false;
+        if (auto v = extractQueryParam(path, "include_incoming"); !v.empty()) {
+            include_incoming = (v == "1" || v == "true");
+        }
+        return handleGraphNeighbors(id_str, include_incoming);
     }
 
     return errorResponse(404, "not found");
@@ -369,15 +381,17 @@ std::string RestServer::routeRequest(const std::string& method, const std::strin
 
 std::string RestServer::handleStore(const std::string& body) {
     try {
-        auto j = json::parse(body);
+        json j = json::parse(body);
         auto content = j.value("content", "");
-        auto ns = j.value("namespace", "default");
-        auto owner_str = j.value("owner", "session");
-
-        MemoryOwner owner = MemoryOwner::Session;
-        if (owner_str == "user") owner = MemoryOwner::User;
-        else if (owner_str == "project") owner = MemoryOwner::Project;
-        else if (owner_str == "agent") owner = MemoryOwner::Agent;
+        auto agent_id = j.value("agent_id", "default_agent");
+        auto user_id = j.value("user_id", "anonymous");
+        
+        // Parse new scope and type parameters
+        auto scope_str = j.value("scope", "private");
+        auto type_str = j.value("memory_type", "ephemeral");
+        
+        MemoryScope scope = scopeFromString(scope_str);
+        MemoryType memory_type = memoryTypeFromString(type_str);
 
         // Client-supplied metadata is flattened to string→string. Nested
         // values are JSON-stringified so we never lose data.
@@ -400,7 +414,7 @@ std::string RestServer::handleStore(const std::string& body) {
         }
 
         auto result = engine_.capturePipeline().capture(
-            content, ns, owner, std::move(user_metadata));
+            content, agent_id, user_id, scope, memory_type, std::move(user_metadata));
         if (!result.ok()) {
             return errorResponse(500, result.error().toString());
         }
@@ -421,8 +435,10 @@ std::string RestServer::handleRecall(const std::string& body) {
     try {
         auto j = json::parse(body);
         auto query = j.value("query", "");
-        auto ns = j.value("namespace", "default");
+        auto agent_id = j.value("agent_id", "default_agent");
+        auto user_id = j.value("user_id", "anonymous");
         auto top_k = j.value("top_k", 10);
+        
         // Optional client-side filters keyed on user_metadata fields.
         // Server applies an exact-match AND filter after the recall pipeline.
         std::map<std::string, std::string> filters;
@@ -437,7 +453,7 @@ std::string RestServer::handleRecall(const std::string& body) {
         // Over-fetch when filters are present so we still return ~top_k after pruning.
         size_t fetch_k = filters.empty() ? static_cast<size_t>(top_k)
                                          : static_cast<size_t>(top_k) * 4;
-        auto result = engine_.retrievalPipeline().recall(query, ns, fetch_k);
+        auto result = engine_.retrievalPipeline().recall(query, agent_id, user_id, fetch_k);
         if (!result.ok()) {
             return errorResponse(500, result.error().toString());
         }
@@ -479,9 +495,11 @@ std::string RestServer::handleRecall(const std::string& body) {
             } else {
                 item["content"] = sm.record.content;
             }
-            item["owner"] = ownerToString(sm.record.owner);
+            item["scope"] = scopeToString(sm.record.scope);
+            item["memory_type"] = memoryTypeToString(sm.record.memory_type);
+            item["tier"] = memoryTierToString(sm.record.tier);
             item["phase"] = phaseToString(sm.record.phase);
-            item["confidence"] = confidenceToString(sm.record.confidence);
+            item["confidence"] = confidenceToString(sm.record.confidence_level);
             item["score"] = sm.total_score;
             item["semantic_score"] = sm.semantic_score;
             if (!sm.record.user_metadata.empty()) {
@@ -510,9 +528,13 @@ std::string RestServer::handleGetMemory(const std::string& id_str) {
         json resp;
         resp["memory_id"] = result->memory_id;
         resp["content"] = result->content;
-        resp["owner"] = ownerToString(result->owner);
+        resp["agent_id"] = result->agent_id;
+        resp["user_id"] = result->user_id;
+        resp["scope"] = scopeToString(result->scope);
+        resp["memory_type"] = memoryTypeToString(result->memory_type);
+        resp["tier"] = memoryTierToString(result->tier);
         resp["phase"] = phaseToString(result->phase);
-        resp["confidence"] = confidenceToString(result->confidence);
+        resp["confidence"] = confidenceToString(result->confidence_level);
         resp["version"] = result->mem_version;
         resp["parent_id"] = result->parent_id;
         resp["importance"] = result->importance;
@@ -620,19 +642,19 @@ std::string RestServer::handleArchiveMemory(const std::string& id_str) {
     }
 }
 
-std::string RestServer::handleDeleteNamespace(const std::string& ns) {
-    static const std::vector<std::string> protected_ns = {
-        "amazon1", "amazon2",
-        "pyclaw:amazon1:pyclaw", "pyclaw:amazon2:pyclaw",
-    };
-    for (const auto& p : protected_ns) {
-        if (ns == p) {
-            return errorResponse(403, "namespace '" + ns + "' is protected and cannot be deleted");
+std::string RestServer::handleDeleteAgentMemories(const std::string& agent_id) {
+    // In the new architecture, we delete memories by agent_id.
+    // Note: This is a heavy operation. In production, this might be restricted or async.
+    // In new architecture, delete all memories from this agent's store via scanAll + remove
+    std::vector<uint64_t> deleted_ids;
+    engine_.memoryStore().scanAll([&](const MemoryRecord& rec) {
+        if (rec.isAlive()) {
+            deleted_ids.push_back(rec.memory_id);
         }
+    });
+    for (uint64_t id : deleted_ids) {
+        engine_.memoryStore().remove(id);
     }
-
-    uint64_t ns_hash = MemoryRecord::hashNamespace(ns);
-    auto deleted_ids = engine_.memoryStore().removeByNamespace(ns_hash);
 
     for (uint64_t id : deleted_ids) {
         engine_.graphStore().removeNode(id);
@@ -640,21 +662,22 @@ std::string RestServer::handleDeleteNamespace(const std::string& ns) {
 
     json resp;
     resp["deleted"] = deleted_ids.size();
-    resp["namespace"] = ns;
+    resp["agent_id"] = agent_id;
     return jsonResponse(200, resp.dump());
 }
 
 std::string RestServer::handleIntercept(const std::string& body) {
     try {
         auto j = json::parse(body);
-        auto ns = j.value("namespace", "default");
+        auto agent_id = j.value("agent_id", "default_agent");
+        auto user_id = j.value("user_id", "anonymous");
         std::vector<std::pair<std::string, std::string>> messages;
         if (j.contains("messages") && j["messages"].is_array()) {
             for (const auto& m : j["messages"]) {
                 messages.emplace_back(m.value("role", ""), m.value("content", ""));
             }
         }
-        auto result = engine_.capturePipeline().interceptCapture(messages, ns);
+        auto result = engine_.capturePipeline().interceptCapture(messages, agent_id, user_id);
         json resp;
         resp["capture_scheduled"] = true;
         if (result.ok()) resp["captured_ids"] = *result;
@@ -691,8 +714,9 @@ std::string RestServer::handleConflicts() {
 std::string RestServer::handleSessionStart(const std::string& body) {
     try {
         auto j = json::parse(body);
-        auto ns = j.value("namespace", "default");
-        auto result = engine_.sessionManager().startSession(ns);
+        auto agent_id = j.value("agent_id", "default_agent");
+        auto user_id = j.value("user_id", "anonymous");
+        auto result = engine_.sessionManager().startSession(agent_id, user_id);
         if (!result.ok()) return errorResponse(500, result.error().toString());
         json resp;
         resp["session_id"] = result->session_id;
@@ -754,7 +778,8 @@ std::string RestServer::handleSessionSummary(const std::string& id_str) {
 
         json resp;
         resp["session_id"] = result->session_id;
-        resp["namespace"] = result->namespace_;
+        resp["agent_id"] = result->agent_id;
+        resp["user_id"] = result->user_id;
         resp["turn_count"] = result->turn_count;
         resp["current_intent"] = result->current_intent;
         resp["memory_count"] = result->memory_count;
@@ -816,11 +841,31 @@ std::string RestServer::handleListMemories(const std::string& path) {
     auto pp_str = extractQueryParam(path, "per_page");
     if (!page_str.empty()) filter.page = std::stoi(page_str);
     if (!pp_str.empty()) filter.per_page = std::stoi(pp_str);
-    filter.owner_filter = extractQueryParam(path, "owner");
+    
+    // Adapt old filters to new fields if present, but prioritize new ones
+    // agent_id filtering is handled at the AgentStore level (physical isolation),
+    // not in ListFilter. The correct AgentStore is already selected by the caller.
+    // We still parse agent_id from the query param for routing purposes.
+    // auto agent_id_param = extractQueryParam(path, "agent_id");
+    if (auto v = extractQueryParam(path, "user_id"); !v.empty()) {
+        filter.user_id_filter = v;
+    }
+    if (auto v = extractQueryParam(path, "scope"); !v.empty()) {
+        filter.scope_filter = v;
+    }
+    if (auto v = extractQueryParam(path, "memory_type"); !v.empty()) {
+        filter.memory_type_filter = v;
+    }
+    
     filter.phase_filter = extractQueryParam(path, "phase");
     filter.query = extractQueryParam(path, "q");
-    filter.namespace_filter = extractQueryParam(path, "namespace");
-    filter.user_id_filter = extractQueryParam(path, "user_id");
+    
+    if (auto v = extractQueryParam(path, "include_tombstone"); v == "1" || v == "true") {
+        filter.include_tombstone = true;
+    }
+    if (auto v = extractQueryParam(path, "layer"); !v.empty()) {
+        filter.layer_filter = v;  // "Raw" | "Derived"
+    }
 
     auto result = engine_.memoryStore().listMemories(filter);
 
@@ -833,15 +878,20 @@ std::string RestServer::handleListMemories(const std::string& path) {
         json m;
         m["memory_id"] = std::to_string(rec.memory_id);
         m["content"] = rec.content;
-        m["owner"] = ownerToString(rec.owner);
+        m["agent_id"] = rec.agent_id;
+        m["user_id"] = rec.user_id;
+        m["scope"] = scopeToString(rec.scope);
+        m["memory_type"] = memoryTypeToString(rec.memory_type);
+        m["tier"] = memoryTierToString(rec.tier);
         m["phase"] = phaseToString(rec.phase);
-        m["confidence"] = confidenceToString(rec.confidence);
+        m["confidence"] = confidenceToString(rec.confidence_level);
         m["importance"] = rec.importance;
         m["created_at"] = rec.created_at;
         m["last_accessed"] = rec.last_accessed;
         m["access_count"] = rec.access_count;
         m["version"] = rec.mem_version;
         m["has_embedding"] = (rec.flags & RecordFlags::HAS_EMBEDDING) != 0;
+        m["layer"] = layerToString(rec.layer);
         if (!rec.user_metadata.empty()) {
             json meta = json::object();
             for (const auto& [k, v] : rec.user_metadata) meta[k] = v;
@@ -891,18 +941,41 @@ std::string RestServer::handleListEdges(const std::string& path) {
     return jsonResponse(200, resp.dump());
 }
 
-std::string RestServer::handleGraphNeighbors(const std::string& id_str) {
+std::string RestServer::handleGraphNeighbors(const std::string& id_str,
+                                              bool include_incoming) {
     try {
         uint64_t memory_id = std::stoull(id_str);
         auto edges = engine_.graphStore().getNeighborEdges(memory_id);
+        if (include_incoming) {
+            // Edges that point INTO this memory live only on the source's
+            // adjacency list (e.g. DerivedFrom written from derived → raw).
+            auto incoming = engine_.graphStore().getIncomingEdges(memory_id);
+            edges.insert(edges.end(), incoming.begin(), incoming.end());
+        }
 
         json resp = json::array();
         for (const auto& e : edges) {
             json edge;
             edge["from_id"] = std::to_string(e.from_id);
-            edge["to_id"] = std::to_string(e.to_id);
-            edge["type"] = edgeTypeToString(e.type);
-            edge["weight"] = e.weight;
+            edge["to_id"]   = std::to_string(e.to_id);
+            edge["type"]    = edgeTypeToString(e.type);
+            edge["weight"]  = e.weight;
+            // Inline the neighbor's current phase + a short content preview so
+            // the WebUI can show "what the other side actually says" without
+            // an N+1 fetch per edge. Looking up the OTHER endpoint of the edge.
+            uint64_t other = e.from_id == memory_id ? e.to_id : e.from_id;
+            if (auto rec = engine_.memoryStore().get(other); rec.ok()) {
+                edge["other_phase"]      = phaseToString(rec->phase);
+                edge["other_confidence"] = confidenceToString(rec->confidence_level);
+                edge["other_preview"]    = truncateUtf8(rec->content, 90);
+            } else {
+                // Edge points at a memory we can no longer load — usually
+                // because it was vacuumed. Surface this so the user knows
+                // why content is missing.
+                edge["other_phase"]      = "Missing";
+                edge["other_confidence"] = "";
+                edge["other_preview"]    = "";
+            }
             resp.push_back(edge);
         }
         return jsonResponse(200, resp.dump());
@@ -917,7 +990,8 @@ std::string RestServer::handleListSessions() {
     for (const auto& s : sessions) {
         json sess;
         sess["session_id"] = std::to_string(s.session_id);
-        sess["namespace"] = s.namespace_;
+        sess["agent_id"] = s.agent_id;
+        sess["user_id"] = s.user_id;
         sess["turn_count"] = s.turn_count;
         sess["current_intent"] = s.current_intent;
         sess["memory_count"] = s.memory_count;
@@ -930,8 +1004,8 @@ std::string RestServer::handleListSessions() {
     return jsonResponse(200, resp.dump());
 }
 
-std::string RestServer::handleCoverageStats(const std::string& query) {
-    auto stats = engine_.metaCognition().getCoverage(query);
+std::string RestServer::handleCoverageStats(const std::string& agent_id) {
+    auto stats = engine_.metaCognition().getCoverage(agent_id);
     json resp;
     resp["total"] = stats.total;
     resp["active"] = stats.active;
@@ -939,20 +1013,64 @@ std::string RestServer::handleCoverageStats(const std::string& query) {
     resp["conflicted"] = stats.conflicted;
     resp["last_updated"] = stats.last_updated;
 
-    // Add owner/phase/confidence distribution
-    json owner_dist = json::object(), phase_dist = json::object(), confidence_dist = json::object();
+    // Add scope/type/phase/confidence distribution
+    json scope_dist = json::object(), type_dist = json::object(), phase_dist = json::object(), confidence_dist = json::object();
     engine_.memoryStore().scanAll([&](const MemoryRecord& rec) {
-        std::string o = ownerToString(rec.owner);
+        if (!agent_id.empty() && rec.agent_id != agent_id) return;
+        
+        std::string sc = scopeToString(rec.scope);
+        std::string tp = memoryTypeToString(rec.memory_type);
         std::string ph = phaseToString(rec.phase);
-        std::string cf = confidenceToString(rec.confidence);
-        owner_dist[o] = (owner_dist.contains(o) ? owner_dist[o].get<int>() : 0) + 1;
+        std::string cf = confidenceToString(rec.confidence_level);
+        
+        scope_dist[sc] = (scope_dist.contains(sc) ? scope_dist[sc].get<int>() : 0) + 1;
+        type_dist[tp] = (type_dist.contains(tp) ? type_dist[tp].get<int>() : 0) + 1;
         phase_dist[ph] = (phase_dist.contains(ph) ? phase_dist[ph].get<int>() : 0) + 1;
         confidence_dist[cf] = (confidence_dist.contains(cf) ? confidence_dist[cf].get<int>() : 0) + 1;
     });
-    resp["owner_distribution"] = owner_dist;
+    resp["scope_distribution"] = scope_dist;
+    resp["memory_type_distribution"] = type_dist;
     resp["phase_distribution"] = phase_dist;
     resp["confidence_distribution"] = confidence_dist;
     return jsonResponse(200, resp.dump());
+}
+
+// ── Agent Management Handlers ───────────────────────────────────────────────
+
+std::string RestServer::handleRegisterAgent(const std::string& body) {
+    try {
+        auto j = json::parse(body);
+        auto agent_id = j.value("agent_id", "");
+        if (agent_id.empty()) {
+            return errorResponse(400, "agent_id is required");
+        }
+        auto result = engine_.registerAgent(agent_id);
+        if (!result.ok()) {
+            return errorResponse(500, result.error().toString());
+        }
+        return jsonResponse(201, R"({"status":"registered","agent_id":")" + agent_id + "\"}");
+    } catch (...) {
+        return errorResponse(400, "invalid JSON");
+    }
+}
+
+std::string RestServer::handleListAgents() {
+    auto agents = engine_.listAgents();
+    json resp = json::array();
+    for (const auto& a : agents) {
+        json item;
+        item["agent_id"] = a;
+        resp.push_back(std::move(item));
+    }
+    return jsonResponse(200, resp.dump());
+}
+
+std::string RestServer::handleUnregisterAgent(const std::string& agent_id) {
+    auto result = engine_.removeAgent(agent_id);
+    if (!result.ok()) {
+        return errorResponse(404, result.error().toString());
+    }
+    return jsonResponse(200, R"({"status":"unregistered","agent_id":")" + agent_id + "\"}");
 }
 
 // ── Health / Metrics ────────────────────────────────────────────────────────
@@ -1037,59 +1155,7 @@ std::string RestServer::handleMetrics() {
     return jsonResponse(200, resp.dump());
 }
 
-std::string RestServer::handlePipelineStats() {
-    json resp;
-    resp["queue_depth"] = engine_.taskQueue().size();
-    resp["queue_capacity"] = 10000;  // from TaskQueue constructor default
-    resp["executor_threads"] = engine_.taskExecutor().numThreads();
-    resp["tasks_completed"] = engine_.taskExecutor().tasksCompleted();
-    resp["tasks_failed"] = engine_.taskExecutor().tasksFailed();
 
-    // Reconciler stats (if available)
-    json rec_json;
-    if (auto* rec = engine_.reconciler()) {
-        auto s = rec->stats();
-        rec_json["total_calls"] = s.total_calls;
-        rec_json["llm_invocations"] = s.llm_invocations;
-        rec_json["llm_failures"] = s.llm_failures;
-        rec_json["op_add"] = s.op_add;
-        rec_json["op_replace"] = s.op_replace;
-        rec_json["op_retract"] = s.op_retract;
-        rec_json["op_reinforce"] = s.op_reinforce;
-        rec_json["op_noop"] = s.op_noop;
-    }
-    resp["reconciler"] = rec_json;
-
-    return jsonResponse(200, resp.dump());
-}
-
-std::string RestServer::handleReconcileLog(const std::string& path) {
-    int limit = 100;
-    auto limit_str = extractQueryParam(path, "limit");
-    if (!limit_str.empty()) {
-        try { limit = std::stoi(limit_str); } catch (...) {}
-    }
-
-    json resp;
-    if (auto* rec = engine_.reconciler()) {
-        auto entries = rec->recentLog(static_cast<size_t>(limit));
-        json arr = json::array();
-        for (const auto& e : entries) {
-            json entry;
-            entry["timestamp_ms"] = e.timestamp_ms;
-            entry["candidate"] = e.candidate;
-            entry["op"] = reconcileOpToString(e.op);
-            entry["target_id"] = std::to_string(e.target_id);
-            entry["latency_ms"] = e.latency_ms;
-            entry["from_fallback"] = e.from_fallback;
-            arr.push_back(std::move(entry));
-        }
-        resp["entries"] = std::move(arr);
-    } else {
-        resp["entries"] = json::array();
-    }
-    return jsonResponse(200, resp.dump());
-}
 
 // ── HTTP Helpers ─────────────────────────────────────────────────────────────
 
@@ -1150,317 +1216,12 @@ std::string RestServer::extractQueryParam(const std::string& path, const std::st
     return urlDecode(raw);
 }
 
-// ── Gate Log handlers ───────────────────────────────────────────────────────
+// Gate/Forget JSON serializers removed in Phase 4 — MemoryEvent handles
+// all observability JSON via memoryEventToJson in the unified handler block.
 
-namespace {
-const char* gateDecisionStr(GateDecision d) {
-    switch (d) {
-        case GateDecision::Accepted: return "Accepted";
-        case GateDecision::Rejected: return "Rejected";
-        case GateDecision::Deferred: return "Deferred";
-    }
-    return "Accepted";
-}
+// forgetEntryToJson removed in Phase 4 (see comment above).
 
-const char* memLayerStr(MemoryLayer l) {
-    return (l == MemoryLayer::Derived) ? "Derived" : "Raw";
-}
 
-json gateEntryToJson(const GateLogEntry& e) {
-    json j;
-    j["entry_id"] = std::to_string(e.entry_id);
-    j["timestamp_ms"] = e.timestamp_ms;
-    j["namespace"] = e.namespace_;
-    j["content"] = e.content;
-    j["decision"] = gateDecisionStr(e.decision);
-    j["reason"] = e.reason;
-    j["marginal_value"] = e.marginal_value;
-    j["conflict_with_id"] = std::to_string(e.conflict_with_id);
-    j["owner"] = ownerToString(e.owner);
-    j["layer"] = memLayerStr(e.layer);
-    if (!e.user_metadata.empty()) {
-        json meta = json::object();
-        for (const auto& [k, v] : e.user_metadata) meta[k] = v;
-        j["user_metadata"] = std::move(meta);
-    }
-    if (e.memory_id != 0) j["memory_id"] = std::to_string(e.memory_id);
-    j["resurrected_to"] = std::to_string(e.resurrected_to);
-    j["resurrected_at_ms"] = e.resurrected_at_ms;
-    if (!e.resurrect_strategy.empty()) j["resurrect_strategy"] = e.resurrect_strategy;
-    if (!e.reconcile_op.empty()) {
-        j["reconcile_op"] = e.reconcile_op;
-        j["reconcile_target_id"] = std::to_string(e.reconcile_target_id);
-        if (!e.reconcile_rationale.empty()) j["reconcile_rationale"] = e.reconcile_rationale;
-    }
-    return j;
-}
-}
-
-std::string RestServer::handleGateLogList(const std::string& path) {
-    GateLog::Filter filter;
-    auto limit_str = extractQueryParam(path, "limit");
-    if (!limit_str.empty()) {
-        try { filter.limit = static_cast<size_t>(std::stoul(limit_str)); } catch (...) {}
-    }
-    if (filter.limit == 0) filter.limit = 100;
-
-    auto decision_str = extractQueryParam(path, "decision");
-    if (!decision_str.empty()) {
-        if (decision_str == "Accepted") filter.decision = GateDecision::Accepted;
-        else if (decision_str == "Rejected") filter.decision = GateDecision::Rejected;
-        else if (decision_str == "Deferred") filter.decision = GateDecision::Deferred;
-    }
-    filter.namespace_filter = extractQueryParam(path, "namespace");
-    auto since_str = extractQueryParam(path, "since_ms");
-    if (!since_str.empty()) {
-        try { filter.since_ms = std::stoll(since_str); } catch (...) {}
-    }
-    auto only_un = extractQueryParam(path, "only_unresurrected");
-    filter.only_unresurrected = (only_un == "1" || only_un == "true");
-
-    auto entries = engine_.gateLog().query(filter);
-    auto stats = engine_.gateLog().stats(filter.since_ms, filter.namespace_filter);
-
-    json resp;
-    json arr = json::array();
-    for (const auto& e : entries) arr.push_back(gateEntryToJson(e));
-    resp["entries"] = std::move(arr);
-    json st;
-    st["accepted"] = stats.accepted;
-    st["rejected"] = stats.rejected;
-    st["deferred"] = stats.deferred;
-    st["resurrected"] = stats.resurrected;
-    st["total"] = stats.total();
-    resp["stats"] = std::move(st);
-    resp["memory_size"] = engine_.gateLog().memorySize();
-    return jsonResponse(200, resp.dump());
-}
-
-std::string RestServer::handleGateLogStats(const std::string& path) {
-    auto ns = extractQueryParam(path, "namespace");
-    int64_t since_ms = 0;
-    auto since_str = extractQueryParam(path, "since_ms");
-    if (!since_str.empty()) {
-        try { since_ms = std::stoll(since_str); } catch (...) {}
-    }
-    auto stats = engine_.gateLog().stats(since_ms, ns);
-    json resp;
-    resp["accepted"] = stats.accepted;
-    resp["rejected"] = stats.rejected;
-    resp["deferred"] = stats.deferred;
-    resp["resurrected"] = stats.resurrected;
-    resp["total"] = stats.total();
-    return jsonResponse(200, resp.dump());
-}
-
-std::string RestServer::handleGateLogResurrect(const std::string& id_str,
-                                                const std::string& body) {
-    uint64_t entry_id = 0;
-    try { entry_id = std::stoull(id_str); } catch (...) {
-        return errorResponse(400, "invalid entry_id");
-    }
-
-    std::string strategy = "coexist";
-    try {
-        if (!body.empty()) {
-            auto j = json::parse(body);
-            strategy = j.value("strategy", "coexist");
-        }
-    } catch (...) {
-        return errorResponse(400, "invalid JSON body");
-    }
-    if (strategy != "coexist" && strategy != "replace_conflict"
-        && strategy != "update_existing") {
-        return errorResponse(400, "strategy must be one of: coexist|replace_conflict|update_existing");
-    }
-
-    auto entry_opt = engine_.gateLog().findById(entry_id);
-    if (!entry_opt) {
-        return errorResponse(404, "gate log entry not found (or aged out of memory ring)");
-    }
-    if (entry_opt->resurrected_to != 0) {
-        return errorResponse(409, "already resurrected to memory #"
-                                  + std::to_string(entry_opt->resurrected_to));
-    }
-
-    json resp;
-    resp["strategy"] = strategy;
-
-    if (strategy == "update_existing") {
-        // No new memory created; we just record the resurrect (the user
-        // confirmed the existing memory is still relevant). Importance bump
-        // could be added once MemoryStore exposes a public set-importance API.
-        if (entry_opt->conflict_with_id == 0) {
-            return errorResponse(400, "update_existing requires a conflict_with_id");
-        }
-        auto rec_r = engine_.memoryStore().get(entry_opt->conflict_with_id);
-        if (!rec_r.ok()) return errorResponse(404, "conflict_with target not found");
-        engine_.gateLog().recordResurrect(entry_id, entry_opt->conflict_with_id, strategy);
-        resp["memory_id"] = std::to_string(entry_opt->conflict_with_id);
-        resp["note"] = "kept existing memory; resurrect logged for audit";
-        return jsonResponse(200, resp.dump());
-    }
-
-    // Build fresh MemoryRecord from the log entry, bypassing WriteGate.
-    MemoryRecord rec;
-    rec.namespace_hash = MemoryRecord::hashNamespace(entry_opt->namespace_);
-    rec.content = entry_opt->content;
-    rec.embedding = entry_opt->embedding;
-    rec.owner = entry_opt->owner;
-    rec.layer = entry_opt->layer;
-    rec.confidence = Confidence::Verified;   // user explicitly resurrected → verified
-    rec.user_metadata = entry_opt->user_metadata;
-    rec.user_metadata["resurrected_from_gate_log"] = std::to_string(entry_id);
-
-    auto store_r = engine_.memoryStore().fastStore(std::move(rec));
-    if (!store_r.ok()) return errorResponse(500, "fastStore failed: " + store_r.error().toString());
-    uint64_t new_id = *store_r;
-
-    if (strategy == "replace_conflict" && entry_opt->conflict_with_id != 0) {
-        // Tombstone the old conflict target (soft delete).
-        engine_.memoryStore().remove(entry_opt->conflict_with_id);
-    }
-
-    engine_.gateLog().recordResurrect(entry_id, new_id, strategy);
-
-    resp["memory_id"] = std::to_string(new_id);
-    if (strategy == "replace_conflict" && entry_opt->conflict_with_id != 0) {
-        resp["replaced_id"] = std::to_string(entry_opt->conflict_with_id);
-    }
-    return jsonResponse(200, resp.dump());
-}
-
-namespace {
-json forgetEntryToJson(const ForgetLogEntry& e) {
-    json j;
-    j["timestamp_ms"] = e.timestamp_ms;
-    j["memory_id"]    = std::to_string(e.memory_id);
-    j["decision"]     = decisionToString(e.decision);
-    j["reason"]       = e.reason;
-    j["before_state"] = phaseToString(e.before_state);
-    j["after_state"]  = phaseToString(e.after_state);
-    if (!e.lineage_affected.empty()) {
-        json arr = json::array();
-        for (auto id : e.lineage_affected) arr.push_back(std::to_string(id));
-        j["lineage_affected"] = std::move(arr);
-    }
-    if (!e.gc_worker_id.empty()) j["gc_worker_id"] = e.gc_worker_id;
-    if (!e.namespace_.empty())   j["namespace"] = e.namespace_;
-    if (!e.content_preview.empty()) j["content"] = e.content_preview;
-    return j;
-}
-}  // namespace
-
-std::string RestServer::handleForgetLog(const std::string& path) {
-    size_t limit = 200;
-    if (auto s = extractQueryParam(path, "limit"); !s.empty()) {
-        try { limit = static_cast<size_t>(std::stoul(s)); } catch (...) {}
-    }
-    if (limit == 0) limit = 200;
-
-    auto decision_filter = extractQueryParam(path, "decision");
-
-    auto entries = engine_.forgetEngine().recentEntries(limit * 4);  // headroom for filter
-
-    // Tally stats from the (filtered) window
-    size_t decay = 0, archive = 0, tombstone = 0, vacuum = 0, other = 0;
-    for (const auto& e : entries) {
-        switch (e.decision) {
-            case ForgetLogEntry::Decision::Decay:     ++decay; break;
-            case ForgetLogEntry::Decision::Archive:   ++archive; break;
-            case ForgetLogEntry::Decision::Tombstone: ++tombstone; break;
-            case ForgetLogEntry::Decision::Vacuum:    ++vacuum; break;
-            default: ++other; break;
-        }
-    }
-
-    // Most recent first
-    std::reverse(entries.begin(), entries.end());
-
-    json arr = json::array();
-    for (const auto& e : entries) {
-        if (!decision_filter.empty() &&
-            decisionToString(e.decision) != decision_filter) continue;
-        if (arr.size() >= limit) break;
-        arr.push_back(forgetEntryToJson(e));
-    }
-
-    json resp;
-    resp["entries"] = std::move(arr);
-
-    json st;
-    st["decay"]     = decay;
-    st["archive"]   = archive;
-    st["tombstone"] = tombstone;
-    st["vacuum"]    = vacuum;
-    st["other"]     = other;
-    st["total"]     = decay + archive + tombstone + vacuum + other;
-    resp["stats"]   = std::move(st);
-
-    auto cfg = engine_.forgetEngine().config();
-    json fcfg;
-    fcfg["enabled"]            = engine_.featureGate().isForgetScoreEnabled();
-    fcfg["shadow_mode"]        = engine_.forgetEngine().isShadowMode();
-    fcfg["decay_threshold"]    = cfg.decay_threshold;
-    fcfg["archive_threshold"]  = cfg.archive_threshold;
-    fcfg["tombstone_threshold"] = cfg.tombstone_threshold;
-    fcfg["gc_interval_seconds"] = cfg.gc_interval_seconds;
-    fcfg["sample_ratio"]       = cfg.sample_ratio;
-    resp["config"] = std::move(fcfg);
-
-    resp["memory_size"] = engine_.forgetEngine().logSize();
-    return jsonResponse(200, resp.dump());
-}
-
-std::string RestServer::handleRecallStaleLog(const std::string& path) {
-    auto* log = engine_.staleLog();
-    json resp;
-    resp["enabled"] = engine_.featureGate().isAggregateStalenessFilterEnabled();
-    if (!log) {
-        resp["entries"] = json::array();
-        resp["memory_size"] = 0;
-        resp["stats"] = {{"total", 0}};
-        return jsonResponse(200, resp.dump());
-    }
-
-    size_t limit = 200;
-    if (auto s = extractQueryParam(path, "limit"); !s.empty()) {
-        try { limit = static_cast<size_t>(std::stoul(s)); } catch (...) {}
-    }
-    auto ns_filter = extractQueryParam(path, "namespace");
-
-    auto entries = log->recentEntries();
-    std::reverse(entries.begin(), entries.end());  // newest first
-
-    json arr = json::array();
-    size_t total = 0;
-    for (const auto& e : entries) {
-        if (!ns_filter.empty() && e.namespace_ != ns_filter) continue;
-        ++total;
-        if (arr.size() >= limit) continue;
-        json j;
-        j["timestamp_ms"] = e.timestamp_ms;
-        j["query"] = e.query;
-        j["namespace"] = e.namespace_;
-        j["aggregate_id"] = std::to_string(e.aggregate_id);
-        j["aggregate_preview"] = e.aggregate_preview;
-        j["aggregate_created_at"] = e.aggregate_created_at;
-        j["witness_in_aggregate"] = e.witness_ids_in_aggregate;
-        j["witness_in_newer"] = e.witness_ids_in_newer_facts;
-        json newer = json::array();
-        for (auto id : e.newer_fact_ids) newer.push_back(std::to_string(id));
-        j["newer_fact_ids"] = std::move(newer);
-        j["action"] = (e.action == StaleFilterEvent::Action::Filter) ? "Filter" : "Downweight";
-        j["pre_score"] = e.pre_score;
-        j["post_score"] = e.post_score;
-        arr.push_back(std::move(j));
-    }
-
-    resp["entries"] = std::move(arr);
-    resp["memory_size"] = log->memorySize();
-    resp["stats"] = {{"total", total}};
-    return jsonResponse(200, resp.dump());
-}
 
 std::string RestServer::handleAdminForgetRun() {
     if (!engine_.featureGate().isForgetScoreEnabled()) {
@@ -1494,6 +1255,258 @@ std::string RestServer::handleAdminConsolidationRun() {
     } catch (const std::exception& e) {
         return errorResponse(500, std::string("consolidation cycle failed: ") + e.what());
     }
+}
+
+// ── Unified observability (MemoryEventLog) handlers ───────────────────────
+// See docs/arch/统一可观测层重构-MemoryEvent.md.
+
+namespace {
+
+json memoryEventToJson(const MemoryEvent& e) {
+    json j;
+    j["event_id"]        = std::to_string(e.event_id);
+    j["parent_event_id"] = std::to_string(e.parent_event_id);
+    j["trace_id"]        = std::to_string(e.trace_id);
+    j["memory_id"]       = std::to_string(e.memory_id);
+    j["timestamp_ms"]    = e.timestamp_ms;
+    j["duration_ms"]     = e.duration_ms;
+    j["agent_id"]        = e.agent_id; // Use new field
+    j["kind"]            = kindToString(e.kind);
+    j["status"]          = statusToString(e.status);
+    j["summary"]         = e.summary;
+    if (!e.attrs.empty()) {
+        json a = json::object();
+        for (const auto& [k, v] : e.attrs) a[k] = v;
+        j["attrs"] = std::move(a);
+    }
+    return j;
+}
+
+}  // namespace
+
+// Helper — populates filter from URL query params. Member function so it
+// can call extractQueryParam(). Used by both /v1/events and /v1/events/stats.
+static MemoryEventLog::Filter buildEventsFilterFromPath(
+    const RestServer* self, const std::string& path, size_t default_limit) {
+    MemoryEventLog::Filter f;
+    f.limit = default_limit;
+    auto p = [&](const char* k) { return RestServer::extractQueryParam(path, k); };
+    if (auto s = p("limit"); !s.empty()) {
+        try { f.limit = static_cast<size_t>(std::stoul(s)); } catch (...) {}
+    }
+    if (auto s = p("memory_id"); !s.empty()) {
+        try { f.memory_id = std::stoull(s); } catch (...) {}
+    }
+    if (auto s = p("trace_id"); !s.empty()) {
+        try { f.trace_id = std::stoull(s); } catch (...) {}
+    }
+    if (auto s = p("kind"); !s.empty()) {
+        EventKind k = kindFromString(s);
+        if (kindToString(k) == s) f.kind = k;
+    }
+    if (auto s = p("status"); !s.empty()) {
+        EventStatus st = statusFromString(s);
+        if (statusToString(st) == s) f.status = st;
+    }
+    // Adapt old namespace filter to agent_id if present
+    if (auto s = p("agent_id"); !s.empty()) {
+        f.agent_id_filter = s;
+    } else if (auto ns = p("namespace"); !ns.empty()) {
+        f.agent_id_filter = ns; // Fallback for backward compatibility
+    }
+    if (auto s = p("since_ms"); !s.empty()) {
+        try { f.since_ms = std::stoull(s); } catch (...) {}
+    }
+    if (auto s = p("until_ms"); !s.empty()) {
+        try { f.until_ms = std::stoull(s); } catch (...) {}
+    }
+    (void)self;
+    return f;
+}
+
+std::string RestServer::handleEventsQuery(const std::string& path) {
+    auto& el = engine_.eventsLog();
+    auto f = buildEventsFilterFromPath(this, path, /*default_limit=*/200);
+    auto rows = el.query(f);
+
+    json resp;
+    json arr = json::array();
+    for (const auto& e : rows) arr.push_back(memoryEventToJson(e));
+    resp["entries"] = std::move(arr);
+    resp["memory_size"] = el.memorySize();
+    return jsonResponse(200, resp.dump());
+}
+
+std::string RestServer::handleMemoryTrace(const std::string& id_str) {
+    uint64_t mid = 0;
+    try { mid = std::stoull(id_str); } catch (...) {
+        return errorResponse(400, "invalid memory_id");
+    }
+    auto& el = engine_.eventsLog();
+    auto rows = el.memoryHistory(mid);  // newest first; only events touching this memory
+
+    // Group events by trace_id so the user sees "this memory was touched by N
+    // separate operations". Within each group we show ONLY events for this
+    // memory_id — clicking the trace_id link drills into the full trace
+    // (including siblings) on the Events page.
+    std::vector<std::string> trace_order;
+    std::unordered_map<std::string, json> by_trace;
+    std::unordered_map<std::string, std::vector<MemoryEvent>> bucket;
+    for (const auto& e : rows) {
+        std::string tid = std::to_string(e.trace_id);
+        if (!by_trace.count(tid)) {
+            json group;
+            group["trace_id"] = tid;
+            by_trace[tid] = std::move(group);
+            trace_order.push_back(tid);
+        }
+        bucket[tid].push_back(e);
+    }
+    for (auto& tid : trace_order) {
+        auto& evs = bucket[tid];
+        std::sort(evs.begin(), evs.end(),
+                  [](const MemoryEvent& a, const MemoryEvent& b) {
+                      return a.timestamp_ms < b.timestamp_ms;
+                  });
+        json arr = json::array();
+        for (const auto& e : evs) arr.push_back(memoryEventToJson(e));
+        by_trace[tid]["events"]      = std::move(arr);
+        by_trace[tid]["event_count"] = evs.size();
+        by_trace[tid]["start_ms"]    = evs.empty() ? 0 : evs.front().timestamp_ms;
+        by_trace[tid]["end_ms"]      = evs.empty() ? 0 : evs.back().timestamp_ms;
+    }
+
+    json traces = json::array();
+    for (const auto& tid : trace_order) traces.push_back(std::move(by_trace[tid]));
+
+    json resp;
+    resp["memory_id"]     = id_str;
+    resp["total_events"]  = rows.size();
+    resp["traces"]        = std::move(traces);
+    return jsonResponse(200, resp.dump());
+}
+
+std::string RestServer::handleTraceById(const std::string& trace_id_str) {
+    uint64_t tid = 0;
+    try { tid = std::stoull(trace_id_str); } catch (...) {
+        return errorResponse(400, "invalid trace_id");
+    }
+    auto& el = engine_.eventsLog();
+    auto events = el.trace(tid);  // chronological ASC
+
+    json resp;
+    resp["trace_id"] = trace_id_str;
+    resp["event_count"] = events.size();
+    resp["start_ms"] = events.empty() ? 0 : events.front().timestamp_ms;
+    resp["end_ms"]   = events.empty() ? 0 : events.back().timestamp_ms;
+    json arr = json::array();
+    for (const auto& e : events) arr.push_back(memoryEventToJson(e));
+    resp["events"] = std::move(arr);
+    return jsonResponse(200, resp.dump());
+}
+
+std::string RestServer::handleEventsStats(const std::string& path) {
+    auto& el = engine_.eventsLog();
+    auto f = buildEventsFilterFromPath(this, path, /*default_limit=*/2000);
+    auto s = el.stats(f);
+
+    json resp;
+    json bk = json::object();
+    for (const auto& [name, count] : s.by_kind)   bk[name] = count;
+    json bs = json::object();
+    for (const auto& [name, count] : s.by_status) bs[name] = count;
+    resp["by_kind"]   = std::move(bk);
+    resp["by_status"] = std::move(bs);
+    resp["total"]     = s.total;
+    resp["memory_size"] = el.memorySize();
+    return jsonResponse(200, resp.dump());
+}
+
+std::string RestServer::handleAdminResurrect(const std::string& event_id_str,
+                                              const std::string& body) {
+    uint64_t event_id = 0;
+    try { event_id = std::stoull(event_id_str); } catch (...) {
+        return errorResponse(400, "invalid event_id");
+    }
+    // Find the source Gate event by scanning the ring (max 2000 entries; if
+    // it's been evicted, we can't resurrect — would need to read events.log
+    // JSONL from disk, deferred).
+    auto& el = engine_.eventsLog();
+    MemoryEventLog::Filter f;
+    f.limit = el.memorySize();  // entire ring
+    auto all = el.query(f);
+    const MemoryEvent* src = nullptr;
+    for (const auto& e : all) {
+        if (e.event_id == event_id) { src = &e; break; }
+    }
+    if (!src) {
+        return errorResponse(404, "event_id not found in recent ring "
+                                  "(may have been evicted; check events.log JSONL)");
+    }
+    if (src->kind != EventKind::Gate) {
+        return errorResponse(400, "resurrect only applies to Gate events");
+    }
+    if (src->status != EventStatus::Rejected && src->status != EventStatus::Deferred) {
+        return errorResponse(400, "source event was not Rejected/Deferred");
+    }
+
+    // Pull the original content. Gate event 'summary' is truncated; full
+    // content is not stored in the event itself (by design — we don't want
+    // to duplicate large payloads). For now use summary as the fact body;
+    // if the user needs to preserve the full original wording, they can
+    // pass it explicitly in the request body.
+    std::string content = src->summary;
+    std::string strategy = "coexist";
+    try {
+        if (!body.empty()) {
+            auto j = json::parse(body);
+            content = j.value("content", content);
+            strategy = j.value("strategy", strategy);
+        }
+    } catch (...) {
+        return errorResponse(400, "invalid JSON body");
+    }
+
+    // Store the fact through the same fast-path as a normal POST /v1/memories.
+    // For resurrect, we use the agent_id from the original event's attrs if available, 
+    // otherwise default to "default_agent". We also need to determine scope/type.
+    auto it_agent = src->attrs.find("agent_id");
+    std::string agent_id = (it_agent != src->attrs.end()) ? it_agent->second : "default_agent";
+    auto it_user = src->attrs.find("user_id");
+    std::string user_id = (it_user != src->attrs.end()) ? it_user->second : "anonymous";
+    
+    // Determine scope and type from attrs or defaults
+    auto it_scope = src->attrs.find("scope");
+    MemoryScope scope = (it_scope != src->attrs.end()) ? scopeFromString(it_scope->second) : MemoryScope::Private;
+    auto it_type = src->attrs.find("memory_type");
+    MemoryType memory_type = (it_type != src->attrs.end()) ? memoryTypeFromString(it_type->second) : MemoryType::Ephemeral;
+
+    auto store_result = engine_.capturePipeline().capture(
+        content, agent_id, user_id, scope, memory_type, {});
+    if (!store_result.ok()) {
+        return errorResponse(500, std::string("resurrect store failed: ") +
+                                  store_result.error().toString());
+    }
+    auto ids = store_result.value();
+    uint64_t new_id = ids.empty() ? 0 : ids.front();
+
+    // Emit Resurrect event so the trace shows the recovery action.
+    MemoryEvent rev;
+    rev.memory_id  = new_id;
+    rev.trace_id   = new_id;
+    rev.agent_id   = agent_id; // Use new field if available in MemoryEvent, otherwise keep namespace_ for backward compat in event log
+    rev.kind       = EventKind::Resurrect;
+    rev.status     = EventStatus::Ok;
+    rev.summary    = content.substr(0, 80);
+    rev.attrs["source_event_id"] = std::to_string(event_id);
+    rev.attrs["strategy"]        = strategy;
+    el.append(std::move(rev));
+
+    json resp;
+    resp["memory_id"]       = std::to_string(new_id);
+    resp["source_event_id"] = std::to_string(event_id);
+    resp["strategy"]        = strategy;
+    return jsonResponse(200, resp.dump());
 }
 
 std::string RestServer::checkAuth(const std::string& headers, const std::string& path) {

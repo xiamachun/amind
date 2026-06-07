@@ -22,10 +22,9 @@ struct DerivedCandidate {
     /// Optional user_metadata inherited from the raw memory so the derived
     /// record carries the same tenant audit trail (user_id, session_id, ...).
     std::map<std::string, std::string> user_metadata;
-    /// Owner inherited from the raw memory. A fact derived from a User-owned
-    /// raw memory is still about the user, not about the AI itself —
-    /// MemoryOwner::Agent is reserved for the AI's own self-knowledge.
-    MemoryOwner owner{MemoryOwner::User};
+    /// Scope and Type inherited from the raw memory.
+    MemoryScope scope{MemoryScope::Private};
+    MemoryType memory_type{MemoryType::Ephemeral};
 };
 
 /// Result of processing one derived candidate through the gate.
@@ -53,7 +52,8 @@ public:
     /// Returns per-fact results (accepted/rejected/deferred).
     std::vector<DerivedResult> processFacts(
         uint64_t raw_memory_id,
-        const std::string& namespace_,
+        const std::string& agent_id,
+        const std::string& user_id,
         const std::vector<DerivedCandidate>& candidates,
         const SimilaritySearchFunc& search_func,
         const StoreFunc& store_func);

@@ -1,5 +1,7 @@
 #include "staleness_filter.h"
 
+#include "observability/memory_event_log.h"
+
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -50,18 +52,8 @@ bool looksLikeListLayout(const std::string& s) {
     return false;
 }
 
-std::string truncateUtf8(const std::string& s, size_t max_bytes) {
-    if (s.size() <= max_bytes) return s;
-    size_t cut = max_bytes;
-    while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
-    return s.substr(0, cut) + "…";
-}
-
-uint64_t now_ms() {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-}
+// truncateUtf8() lives in observability/memory_event.h — shared helper.
+// now_ms() removed — emit path uses MemoryEventLog which timestamps internally.
 
 }  // namespace
 
@@ -96,7 +88,7 @@ size_t AggregateStalenessFilter::apply(
     std::vector<ScoredCandidate>& candidates,
     const std::string& query,
     const std::string& namespace_hint,
-    StaleLog* log) const {
+    MemoryEventLog* events) const {
 
     if (!config_.enabled) return 0;
     if (candidates.size() < 2) return 0;
@@ -176,25 +168,39 @@ size_t AggregateStalenessFilter::apply(
         drop[i] = true;
         ++dropped;
 
-        if (log) {
-            StaleFilterEvent ev;
-            ev.timestamp_ms = now_ms();
-            ev.query = query;
-            ev.namespace_ = namespace_hint;
-            ev.aggregate_id = candidates[i].memory_id;
-            ev.aggregate_preview = truncateUtf8(agg_rec.content, 200);
-            ev.aggregate_created_at = agg_rec.created_at;
-            ev.witness_ids_in_aggregate.assign(agg_ids_total.begin(), agg_ids_total.end());
+        if (events) {
             std::sort(witness_ids_in_newer.begin(), witness_ids_in_newer.end());
             witness_ids_in_newer.erase(
                 std::unique(witness_ids_in_newer.begin(), witness_ids_in_newer.end()),
                 witness_ids_in_newer.end());
-            ev.witness_ids_in_newer_facts = std::move(witness_ids_in_newer);
-            ev.newer_fact_ids = std::move(newer_ids);
-            ev.action = StaleFilterEvent::Action::Filter;
-            ev.pre_score = candidates[i].score;
-            ev.post_score = 0.0f;
-            log->append(ev);
+
+            // Pipe-separated lists keep the JSONL line lean and parseable.
+            auto join_pipe = [](const auto& items) {
+                std::string out;
+                bool first = true;
+                for (const auto& s : items) {
+                    if (!first) out += "|";
+                    out += s;
+                    first = false;
+                }
+                return out;
+            };
+
+            MemoryEvent ev;
+            ev.memory_id = candidates[i].memory_id;
+            ev.agent_id = namespace_hint;
+            ev.kind = EventKind::RecallStale;
+            ev.status = EventStatus::Ok;
+            ev.summary = truncateUtf8(agg_rec.content, 80);
+            ev.attrs["query"] = query;
+            ev.attrs["action"] = "Filter";
+            ev.attrs["aggregate_created_at"] = std::to_string(agg_rec.created_at);
+            ev.attrs["pre_score"] = std::to_string(candidates[i].score);
+            ev.attrs["witness_in_aggregate"] =
+                join_pipe(std::vector<std::string>(agg_ids_total.begin(), agg_ids_total.end()));
+            ev.attrs["witness_in_newer"] = join_pipe(witness_ids_in_newer);
+            ev.attrs["newer_fact_count"] = std::to_string(newer_ids.size());
+            events->append(std::move(ev));
         }
     }
 
@@ -209,119 +215,7 @@ size_t AggregateStalenessFilter::apply(
     return dropped;
 }
 
-// ── StaleLog ─────────────────────────────────────────────────────────────────
-
-namespace {
-
-json eventToJson(const StaleFilterEvent& e) {
-    json j;
-    j["ts"] = e.timestamp_ms;
-    j["query"] = e.query;
-    j["ns"] = e.namespace_;
-    j["aggregate_id"] = std::to_string(e.aggregate_id);
-    j["aggregate_preview"] = e.aggregate_preview;
-    j["aggregate_created_at"] = e.aggregate_created_at;
-    j["witness_in_aggregate"] = e.witness_ids_in_aggregate;
-    j["witness_in_newer"] = e.witness_ids_in_newer_facts;
-    json ids = json::array();
-    for (auto id : e.newer_fact_ids) ids.push_back(std::to_string(id));
-    j["newer_fact_ids"] = std::move(ids);
-    j["action"] = (e.action == StaleFilterEvent::Action::Filter) ? "Filter" : "Downweight";
-    j["pre_score"] = e.pre_score;
-    j["post_score"] = e.post_score;
-    return j;
-}
-
-StaleFilterEvent jsonToEvent(const json& j) {
-    StaleFilterEvent e;
-    e.timestamp_ms = j.value("ts", uint64_t(0));
-    e.query = j.value("query", "");
-    e.namespace_ = j.value("ns", "");
-    e.aggregate_id = std::stoull(j.value("aggregate_id", "0"));
-    e.aggregate_preview = j.value("aggregate_preview", "");
-    e.aggregate_created_at = j.value("aggregate_created_at", 0u);
-    if (j.contains("witness_in_aggregate") && j["witness_in_aggregate"].is_array()) {
-        for (const auto& v : j["witness_in_aggregate"]) e.witness_ids_in_aggregate.push_back(v.get<std::string>());
-    }
-    if (j.contains("witness_in_newer") && j["witness_in_newer"].is_array()) {
-        for (const auto& v : j["witness_in_newer"]) e.witness_ids_in_newer_facts.push_back(v.get<std::string>());
-    }
-    if (j.contains("newer_fact_ids") && j["newer_fact_ids"].is_array()) {
-        for (const auto& v : j["newer_fact_ids"]) e.newer_fact_ids.push_back(std::stoull(v.get<std::string>()));
-    }
-    auto act = j.value("action", "Filter");
-    e.action = (act == "Downweight") ? StaleFilterEvent::Action::Downweight
-                                      : StaleFilterEvent::Action::Filter;
-    e.pre_score = j.value("pre_score", 0.0f);
-    e.post_score = j.value("post_score", 0.0f);
-    return e;
-}
-
-}  // namespace
-
-StaleLog::StaleLog(const std::string& data_dir, size_t ring)
-    : data_dir_(data_dir), ring_capacity_(ring) {}
-
-StaleLog::~StaleLog() {
-    if (file_.is_open()) {
-        file_.flush();
-        file_.close();
-    }
-}
-
-void StaleLog::open() {
-    std::lock_guard lock(mutex_);
-    namespace fs = std::filesystem;
-    if (!fs::exists(data_dir_)) fs::create_directories(data_dir_);
-    auto path = data_dir_ + "/recall_stale.log";
-    file_.open(path, std::ios::binary | std::ios::app);
-    if (!file_.is_open()) {
-        spdlog::warn("StaleLog: failed to open {}", path);
-    }
-}
-
-void StaleLog::replay() {
-    std::lock_guard lock(mutex_);
-    namespace fs = std::filesystem;
-    auto path = data_dir_ + "/recall_stale.log";
-    if (!fs::exists(path)) return;
-    std::ifstream in(path, std::ios::binary);
-    if (!in.is_open()) return;
-    std::string line;
-    size_t count = 0;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
-        try {
-            auto j = json::parse(line);
-            recent_.push_back(jsonToEvent(j));
-            ++count;
-        } catch (...) {
-            continue;
-        }
-    }
-    while (recent_.size() > ring_capacity_) recent_.pop_front();
-    spdlog::info("StaleLog: replayed {} entries", count);
-}
-
-void StaleLog::append(const StaleFilterEvent& ev) {
-    std::lock_guard lock(mutex_);
-    recent_.push_back(ev);
-    while (recent_.size() > ring_capacity_) recent_.pop_front();
-    if (file_.is_open()) {
-        std::string line = eventToJson(ev).dump() + "\n";
-        file_.write(line.data(), static_cast<std::streamsize>(line.size()));
-        file_.flush();
-    }
-}
-
-std::vector<StaleFilterEvent> StaleLog::recentEntries() const {
-    std::lock_guard lock(mutex_);
-    return {recent_.begin(), recent_.end()};
-}
-
-size_t StaleLog::memorySize() const {
-    std::lock_guard lock(mutex_);
-    return recent_.size();
-}
+// StaleLog implementation removed in Phase 4 — events flow into the
+// unified MemoryEventLog via apply()'s `events` parameter.
 
 }  // namespace amind

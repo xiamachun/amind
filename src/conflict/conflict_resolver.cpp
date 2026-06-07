@@ -116,8 +116,8 @@ int ConflictResolver::confidenceRank(Confidence conf) {
 
 std::optional<ConflictResolution> ConflictResolver::tryConfidence(
     const MemoryRecord& a, const MemoryRecord& b) {
-    int rank_a = confidenceRank(a.confidence);
-    int rank_b = confidenceRank(b.confidence);
+    int rank_a = confidenceRank(a.confidence_level);
+    int rank_b = confidenceRank(b.confidence_level);
 
     if (rank_a == rank_b) return std::nullopt;
 
@@ -127,8 +127,8 @@ std::optional<ConflictResolution> ConflictResolver::tryConfidence(
         .loser_id = a_wins ? b.memory_id : a.memory_id,
         .level = ResolutionLevel::Confidence,
         .reason = std::string(a_wins ? "A" : "B") + " has higher confidence ("
-                  + confidenceToString(a_wins ? a.confidence : b.confidence) + " > "
-                  + confidenceToString(a_wins ? b.confidence : a.confidence) + ")"
+                  + confidenceToString(a_wins ? a.confidence_level : b.confidence_level) + " > "
+                  + confidenceToString(a_wins ? b.confidence_level : a.confidence_level) + ")"
     };
 }
 

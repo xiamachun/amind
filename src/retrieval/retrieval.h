@@ -20,7 +20,8 @@ namespace amind {
 struct QueryIntent {
     std::string rewritten_query;
     std::vector<std::string> entities;
-    MemoryOwner preferred_owner{MemoryOwner::User};
+    MemoryScope preferred_scope{MemoryScope::Private};
+    MemoryType preferred_type{MemoryType::UserProfile};
     float urgency{0.5f};
 };
 
@@ -56,8 +57,11 @@ public:
     /// Full recall pipeline. Intent analysis is OFF by default (pure vector
     /// search is sufficient for most queries and saves one LLM round-trip).
     Result<std::vector<ScoredMemory>> recall(
-        const std::string& query, const std::string& namespace_,
-        size_t top_k = 10, bool analyze_intent = false);
+        const std::string& query, 
+        const std::string& agent_id,
+        const std::string& user_id,
+        size_t top_k = 10, 
+        bool analyze_intent = false);
 
     /// Simple vector similarity search (no intent analysis).
     Result<std::vector<ScoredMemory>> simpleSearch(
@@ -104,15 +108,15 @@ public:
     /// atomic facts in the same result set. Both pointers may be null
     /// (filter disabled). The filter does not own the log.
     void setStalenessFilter(const AggregateStalenessFilter* filter,
-                            StaleLog* log) {
+                            MemoryEventLog* events) {
         staleness_filter_ = filter;
-        stale_log_ = log;
+        events_log_ = events;
     }
 
 private:
     CapturePipeline* capture_pipeline_{nullptr};
     const AggregateStalenessFilter* staleness_filter_{nullptr};
-    StaleLog* stale_log_{nullptr};
+    MemoryEventLog* events_log_{nullptr};
 };
 
 }  // namespace amind

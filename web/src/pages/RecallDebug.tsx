@@ -20,7 +20,7 @@ interface DebugResult {
 
 export default function RecallDebug() {
   const [query, setQuery] = useState('')
-  const [namespace, setNamespace] = useState('')
+  const [agentId, setAgentId] = useState('')
   const [results, setResults] = useState<DebugResult[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -33,7 +33,7 @@ export default function RecallDebug() {
       const res = await fetch('/api/v1/memories/recall', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, namespace: namespace || undefined, top_k: 10, debug: true }),
+        body: JSON.stringify({ query, agent_id: agentId || undefined, top_k: 10, debug: true }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
@@ -72,8 +72,8 @@ export default function RecallDebug() {
           onKeyDown={e => { if (e.key === 'Enter') doRecall() }}
           placeholder="Enter recall query..."
           className="flex-1 px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none" />
-        <input value={namespace} onChange={e => setNamespace(e.target.value)}
-          placeholder="namespace (optional)"
+        <input value={agentId} onChange={e => setAgentId(e.target.value)}
+          placeholder="agent_id (optional)"
           className="w-48 px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none" />
         <button onClick={doRecall} disabled={loading}
           className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors">

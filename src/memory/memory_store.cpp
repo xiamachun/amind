@@ -248,30 +248,6 @@ Result<void, Error> MemoryStore::archive(uint64_t memory_id) {
     return Result<void, Error>();
 }
 
-std::vector<uint64_t> MemoryStore::removeByNamespace(uint64_t namespace_hash) {
-    std::unique_lock lock(mutex_);
-
-    std::vector<uint64_t> to_delete;
-    for (const auto& [id, rec] : cache_) {
-        if (rec.namespace_hash == namespace_hash && rec.isAlive()) {
-            to_delete.push_back(id);
-        }
-    }
-
-    for (uint64_t id : to_delete) {
-        hnsw_->softDelete(id);
-        auto it = cache_.find(id);
-        if (it != cache_.end()) {
-            it->second.markTombstone();
-            lsm_->putRaw(id, it->second.serialize());
-            cache_.erase(it);
-        }
-    }
-
-    spdlog::info("removeByNamespace: ns_hash={} deleted {} memories", namespace_hash, to_delete.size());
-    return to_delete;
-}
-
 void MemoryStore::setEmbedding(uint64_t memory_id, std::vector<float> embedding) {
     std::unique_lock lock(mutex_);
     auto it = cache_.find(memory_id);
@@ -362,8 +338,8 @@ void MemoryStore::applyDecay() {
 
         // Mark stale if threshold exceeded
         if (age_hours > static_cast<float>(config_.stale_threshold_hours)
-            && record.confidence != Confidence::Verified) {
-            record.confidence = Confidence::Stale;
+            && record.confidence_level != Confidence::Verified) {
+            record.confidence_level = Confidence::Stale;
         }
     }
 }
@@ -409,41 +385,22 @@ void MemoryStore::flush() {
     }
 }
 
-void MemoryStore::registerNamespaceString(const std::string& namespace_string) {
-    if (namespace_string.empty()) return;
-    uint64_t h = MemoryRecord::hashNamespace(namespace_string);
-    std::unique_lock lk(ns_mutex_);
-    ns_strings_.emplace(h, namespace_string);
-}
-
-std::string MemoryStore::namespaceFromHash(uint64_t namespace_hash) const {
-    std::shared_lock lk(ns_mutex_);
-    auto it = ns_strings_.find(namespace_hash);
-    return it == ns_strings_.end() ? std::string() : it->second;
-}
-
-
 MemoryStore::ListResult MemoryStore::listMemories(const ListFilter& filter) const {
     std::shared_lock lock(mutex_);
     ListResult result;
     result.page = filter.page;
     result.per_page = filter.per_page;
 
-    // Pre-compute namespace hash for filtering
-    uint64_t ns_hash = 0;
-    if (!filter.namespace_filter.empty()) {
-        ns_hash = MemoryRecord::hashNamespace(filter.namespace_filter);
-    }
-
     // Collect matching records
     std::vector<const MemoryRecord*> matched;
     matched.reserve(cache_.size());
     for (const auto& [id, rec] : cache_) {
-        if (!rec.isAlive()) continue;
-        if (!filter.owner_filter.empty() && ownerToString(rec.owner) != filter.owner_filter) continue;
+        if (!rec.isAlive() && !filter.include_tombstone) continue;
+        if (!filter.scope_filter.empty() && scopeToString(rec.scope) != filter.scope_filter) continue;
+        if (!filter.memory_type_filter.empty() && memoryTypeToString(rec.memory_type) != filter.memory_type_filter) continue;
         if (!filter.phase_filter.empty() && phaseToString(rec.phase) != filter.phase_filter) continue;
+        if (!filter.layer_filter.empty() && layerToString(rec.layer) != filter.layer_filter) continue;
         if (!filter.query.empty() && rec.content.find(filter.query) == std::string::npos) continue;
-        if (ns_hash != 0 && rec.namespace_hash != ns_hash) continue;
         if (!filter.user_id_filter.empty()) {
             auto it = rec.user_metadata.find("user_id");
             if (it == rec.user_metadata.end() || it->second != filter.user_id_filter) continue;

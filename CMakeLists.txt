@@ -10,16 +10,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ── SIMD: enable SSE3/SSE4.1 on x86_64 for HNSW distance computation ──────
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64|i[3-6]86)")
+# On Apple, respect CMAKE_OSX_ARCHITECTURES (handles Rosetta hosts targeting arm64)
+set(_amind_target_proc "${CMAKE_SYSTEM_PROCESSOR}")
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    set(_amind_target_proc "${CMAKE_OSX_ARCHITECTURES}")
+endif()
+if(_amind_target_proc MATCHES "(x86_64|AMD64|i[3-6]86)")
     add_compile_options(-msse3 -msse4.1)
 endif()
 
+# ── OpenSSL (required by auth module for SHA-256) ─────────────────────────
+if(APPLE AND NOT DEFINED OPENSSL_ROOT_DIR)
+    execute_process(COMMAND brew --prefix openssl OUTPUT_VARIABLE OPENSSL_ROOT_DIR OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
+find_package(OpenSSL REQUIRED)
+message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
+
 # ── TLS/HTTPS support ─────────────────────────────────────────────────────
 option(AMIND_ENABLE_TLS "Enable TLS/HTTPS support" OFF)
-if(AMIND_ENABLE_TLS)
-    find_package(OpenSSL REQUIRED)
-    message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
-endif()
 
 # ── Compiler warnings ───────────────────────────────────────────────────────
 add_compile_options(

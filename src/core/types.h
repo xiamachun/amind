@@ -5,15 +5,30 @@
 
 namespace amind {
 
-/// Memory ownership model — classifies memories by who they belong to,
-/// not by cognitive category. This is the fundamental axis for isolation
-/// and access control.
-enum class MemoryOwner : uint8_t {
-    User = 0,      // Belongs to the human user (preferences, habits, personal info)
-    Project = 1,   // Belongs to the project/codebase (architecture, conventions)
-    Agent = 2,     // Belongs to the AI agent itself (lessons learned, skills)
-    Session = 3,   // Temporary, belongs to current conversation session
-    Shared = 4,    // Cross-agent team knowledge (shared decisions, standards)
+/// Memory visibility scope — controls who can see a memory.
+/// Combined with agent_id and user_id for multi-tenant isolation.
+enum class MemoryScope : uint8_t {
+    Private = 0,        // Only visible to the specific user_id + agent_id
+    AgentShared = 1,    // Visible to all users within the same agent_id
+};
+
+/// Memory semantic type — classifies what kind of information a memory holds.
+/// Affects WriteGate policy, decay rate, and recall weighting.
+enum class MemoryType : uint8_t {
+    UserProfile = 0,       // User persona: role, preferences, knowledge level
+    Feedback = 1,          // Behavioral feedback: corrections + confirmations
+    DomainKnowledge = 2,   // Agent domain expertise (e.g. DBA best practices)
+    Reference = 3,         // Pointers to external resources (URLs, docs)
+    Skill = 4,             // Reusable workflows / procedures
+    Ephemeral = 5,         // Temporary memory (fast decay, session-level)
+};
+
+/// Memory quality tier — fast vs slow memory layer.
+/// Ephemeral memories are written quickly with lower quality bar;
+/// Consolidated memories have been verified through integration.
+enum class MemoryTier : uint8_t {
+    Ephemeral = 0,         // Fast memory: low-bar write, fast decay, unverified
+    Consolidated = 1,      // Slow memory: verified through consolidation, slow decay
 };
 
 /// Memory lifecycle phases — every memory transitions through these states.
@@ -157,15 +172,64 @@ struct RecordFlags {
 
 // ── String conversions ──────────────────────────────────────────────────────
 
-inline std::string ownerToString(MemoryOwner owner) {
-    switch (owner) {
-        case MemoryOwner::User:    return "User";
-        case MemoryOwner::Project: return "Project";
-        case MemoryOwner::Agent:   return "Agent";
-        case MemoryOwner::Session: return "Session";
-        case MemoryOwner::Shared:  return "Shared";
+inline std::string scopeToString(MemoryScope scope) {
+    switch (scope) {
+        case MemoryScope::Private:      return "private";
+        case MemoryScope::AgentShared:  return "agent_shared";
     }
-    return "Unknown";
+    return "unknown";
+}
+
+inline MemoryScope scopeFromString(const std::string& s) {
+    if (s == "agent_shared") return MemoryScope::AgentShared;
+    return MemoryScope::Private;  // default
+}
+
+inline std::string memoryTypeToString(MemoryType type) {
+    switch (type) {
+        case MemoryType::UserProfile:      return "user_profile";
+        case MemoryType::Feedback:         return "feedback";
+        case MemoryType::DomainKnowledge:  return "domain_knowledge";
+        case MemoryType::Reference:        return "reference";
+        case MemoryType::Skill:            return "skill";
+        case MemoryType::Ephemeral:        return "ephemeral";
+    }
+    return "unknown";
+}
+
+inline MemoryType memoryTypeFromString(const std::string& s) {
+    if (s == "user_profile")      return MemoryType::UserProfile;
+    if (s == "feedback")          return MemoryType::Feedback;
+    if (s == "domain_knowledge")  return MemoryType::DomainKnowledge;
+    if (s == "reference")         return MemoryType::Reference;
+    if (s == "skill")             return MemoryType::Skill;
+    return MemoryType::Ephemeral;  // default
+}
+
+inline std::string memoryTierToString(MemoryTier tier) {
+    switch (tier) {
+        case MemoryTier::Ephemeral:     return "ephemeral";
+        case MemoryTier::Consolidated:  return "consolidated";
+    }
+    return "unknown";
+}
+
+inline MemoryTier memoryTierFromString(const std::string& s) {
+    if (s == "consolidated") return MemoryTier::Consolidated;
+    return MemoryTier::Ephemeral;  // default
+}
+
+/// Returns the recommended default scope for a given memory type.
+inline MemoryScope defaultScopeForType(MemoryType type) {
+    switch (type) {
+        case MemoryType::UserProfile:  return MemoryScope::Private;
+        case MemoryType::Feedback:     return MemoryScope::Private;
+        case MemoryType::Ephemeral:    return MemoryScope::Private;
+        case MemoryType::DomainKnowledge: return MemoryScope::AgentShared;
+        case MemoryType::Reference:    return MemoryScope::AgentShared;
+        case MemoryType::Skill:        return MemoryScope::AgentShared;
+    }
+    return MemoryScope::Private;
 }
 
 inline std::string phaseToString(MemoryPhase phase) {

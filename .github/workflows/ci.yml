@@ -29,7 +29,8 @@ jobs:
             build-essential cmake git \
             libssl-dev libxxhash-dev \
             libmsgpack-dev nlohmann-json3-dev \
-            libspdlog-dev libfmt-dev liblz4-dev
+            libspdlog-dev libfmt-dev liblz4-dev \
+            libgtest-dev libgmock-dev
           # crc32c — not in Ubuntu repos, build from source
           cd /tmp && git clone https://github.com/google/crc32c.git
           cd crc32c && git submodule update --init --recursive

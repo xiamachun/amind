@@ -3,6 +3,7 @@
 #include "lineage/propagator.h"
 
 #include <gtest/gtest.h>
+#include <memory>
 #include <vector>
 
 using namespace amind;
@@ -209,7 +210,8 @@ TEST(PropagatorTest, PropagateWithMultipleChildren) {
 }
 
 TEST(PropagatorTest, MaxDepthLimitsConfig) {
-    LineagePropagator propagator(*new LineageIndex(), 3);
+    auto idx = std::make_unique<LineageIndex>();
+    LineagePropagator propagator(*idx, 3);
     EXPECT_EQ(propagator.maxDepth(), 3);
     propagator.setMaxDepth(7);
     EXPECT_EQ(propagator.maxDepth(), 7);

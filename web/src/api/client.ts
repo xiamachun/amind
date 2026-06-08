@@ -24,11 +24,13 @@ export interface CoverageStats {
   memory_type_distribution: Record<string, number>
   phase_distribution: Record<string, number>
   confidence_distribution: Record<string, number>
+  tier_distribution: Record<string, number>
 }
 
 export interface Memory {
   memory_id: string; content: string; phase: string
   agent_id: string; user_id: string; scope: string; memory_type: string
+  tier: string
   confidence: string; importance: number; created_at: number
   last_accessed: number; access_count: number; version: number
   has_embedding: boolean
@@ -77,13 +79,16 @@ export const api = {
 
   listMemories: (page = 1, perPage = 50, owner = '', phase = '', q = '',
                   agent_id = '', userId = '', layer = '',
-                  includeTombstone = false) => {
+                  includeTombstone = false,
+                  memoryType = '', tier = '') => {
     const params = new URLSearchParams({
       page: String(page), per_page: String(perPage),
       owner, phase, q, agent_id, user_id: userId,
     })
     if (layer) params.set('layer', layer)
     if (includeTombstone) params.set('include_tombstone', '1')
+    if (memoryType) params.set('memory_type', memoryType)
+    if (tier) params.set('tier', tier)
     return fetchApi<MemoryListResponse>(`/v1/memories/list?${params.toString()}`)
   },
 

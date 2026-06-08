@@ -30,7 +30,7 @@ std::vector<uint64_t> ConsolidationWorker::promoteTopK(
         if (record.confidence_level == Confidence::Inferred) {
             record.scope = MemoryScope::Private;
             record.memory_type = MemoryType::UserProfile;
-            record.tier = MemoryTier::Consolidated;
+            record.tier = MemoryTier::ShortTerm;
             record.confidence_level = Confidence::Verified;
             promoted_ids.push_back(record.memory_id);
         }

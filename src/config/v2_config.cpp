@@ -50,6 +50,36 @@ bool FeatureGate::isAggregateStalenessFilterEnabled() const {
     return config_.aggregate_staleness_filter_enabled;
 }
 
+bool FeatureGate::isAgentStoreRoutingEnabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return config_.agent_store_routing_enabled;
+}
+
+bool FeatureGate::isTieredDecayEnabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return config_.tiered_decay_enabled;
+}
+
+bool FeatureGate::isExponentialDecayEnabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return config_.exponential_decay_enabled;
+}
+
+bool FeatureGate::isAccessPromotionEnabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return config_.access_promotion_enabled;
+}
+
+bool FeatureGate::isRecencyGateEnabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return config_.recency_gate_enabled;
+}
+
+bool FeatureGate::isTierDemotionEnabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return config_.tier_demotion_enabled;
+}
+
 bool FeatureGate::isGlobalShadowMode() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return config_.global_shadow_mode;
@@ -65,6 +95,12 @@ bool FeatureGate::isEnabled(const std::string& feature_name) const {
     if (feature_name == "consolidation")         return config_.consolidation_enabled;
     if (feature_name == "reconcile")             return config_.reconcile_enabled;
     if (feature_name == "aggregate_staleness_filter") return config_.aggregate_staleness_filter_enabled;
+    if (feature_name == "agent_store_routing")   return config_.agent_store_routing_enabled;
+    if (feature_name == "tiered_decay")          return config_.tiered_decay_enabled;
+    if (feature_name == "exponential_decay")     return config_.exponential_decay_enabled;
+    if (feature_name == "access_promotion")      return config_.access_promotion_enabled;
+    if (feature_name == "recency_gate")          return config_.recency_gate_enabled;
+    if (feature_name == "tier_demotion")         return config_.tier_demotion_enabled;
     return false;
 }
 
@@ -112,6 +148,42 @@ void FeatureGate::setReconcileEnabled(bool enabled) {
     spdlog::info("FeatureGate: reconcile = {}", enabled);
 }
 
+void FeatureGate::setAgentStoreRoutingEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.agent_store_routing_enabled = enabled;
+    spdlog::info("FeatureGate: agent_store_routing = {}", enabled);
+}
+
+void FeatureGate::setTieredDecayEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.tiered_decay_enabled = enabled;
+    spdlog::info("FeatureGate: tiered_decay = {}", enabled);
+}
+
+void FeatureGate::setExponentialDecayEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.exponential_decay_enabled = enabled;
+    spdlog::info("FeatureGate: exponential_decay = {}", enabled);
+}
+
+void FeatureGate::setAccessPromotionEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.access_promotion_enabled = enabled;
+    spdlog::info("FeatureGate: access_promotion = {}", enabled);
+}
+
+void FeatureGate::setRecencyGateEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.recency_gate_enabled = enabled;
+    spdlog::info("FeatureGate: recency_gate = {}", enabled);
+}
+
+void FeatureGate::setTierDemotionEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.tier_demotion_enabled = enabled;
+    spdlog::info("FeatureGate: tier_demotion = {}", enabled);
+}
+
 void FeatureGate::setGlobalShadowMode(bool enabled) {
     std::lock_guard<std::mutex> lock(mutex_);
     config_.global_shadow_mode = enabled;
@@ -127,8 +199,14 @@ void FeatureGate::enableAll() {
     config_.conflict_resolver_enabled = true;
     config_.consolidation_enabled = true;
     config_.reconcile_enabled = true;
+    config_.agent_store_routing_enabled = true;
+    config_.tiered_decay_enabled = true;
+    config_.exponential_decay_enabled = true;
+    config_.access_promotion_enabled = true;
+    config_.recency_gate_enabled = true;
+    config_.tier_demotion_enabled = true;
     config_.global_shadow_mode = false;
-    spdlog::info("FeatureGate: all V2 features enabled, shadow mode OFF");
+    spdlog::info("FeatureGate: all features enabled, shadow mode OFF");
 }
 
 void FeatureGate::disableAll() {
@@ -140,8 +218,14 @@ void FeatureGate::disableAll() {
     config_.conflict_resolver_enabled = false;
     config_.consolidation_enabled = false;
     config_.reconcile_enabled = false;
+    // agent_store_routing stays true — it's architectural foundation
+    config_.tiered_decay_enabled = false;
+    config_.exponential_decay_enabled = false;
+    config_.access_promotion_enabled = false;
+    config_.recency_gate_enabled = false;
+    config_.tier_demotion_enabled = false;
     config_.global_shadow_mode = true;
-    spdlog::info("FeatureGate: all V2 features disabled (emergency kill switch)");
+    spdlog::info("FeatureGate: all features disabled (emergency kill switch)");
 }
 
 // ── Config snapshot ──────────────────────────────────────────────────────
@@ -161,6 +245,12 @@ int FeatureGate::enabledCount() const {
     if (config_.conflict_resolver_enabled) count++;
     if (config_.consolidation_enabled) count++;
     if (config_.reconcile_enabled) count++;
+    if (config_.agent_store_routing_enabled) count++;
+    if (config_.tiered_decay_enabled) count++;
+    if (config_.exponential_decay_enabled) count++;
+    if (config_.access_promotion_enabled) count++;
+    if (config_.recency_gate_enabled) count++;
+    if (config_.tier_demotion_enabled) count++;
     return count;
 }
 

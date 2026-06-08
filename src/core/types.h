@@ -23,12 +23,19 @@ enum class MemoryType : uint8_t {
     Ephemeral = 5,         // Temporary memory (fast decay, session-level)
 };
 
-/// Memory quality tier — fast vs slow memory layer.
-/// Ephemeral memories are written quickly with lower quality bar;
-/// Consolidated memories have been verified through integration.
+/// Memory quality tier — three-level memory hierarchy inspired by cognitive science
+/// (Atkinson-Shiffrin model: sensory → short-term → long-term memory).
+///
+/// Working memories decay fast and are promoted to ShortTerm on repeated access.
+/// ShortTerm memories are stable and promoted to LongTerm when proven important.
+/// LongTerm memories decay very slowly — they represent core knowledge.
+///
+/// Backward compatibility: old Ephemeral(0) maps to Working(0),
+///                         old Consolidated(1) maps to ShortTerm(1).
 enum class MemoryTier : uint8_t {
-    Ephemeral = 0,         // Fast memory: low-bar write, fast decay, unverified
-    Consolidated = 1,      // Slow memory: verified through consolidation, slow decay
+    Working = 0,       // Fast memory: low-bar write, fast decay, unverified
+    ShortTerm = 1,     // Intermediate: accessed enough times to be retained
+    LongTerm = 2,      // Core knowledge: high importance, very slow decay
 };
 
 /// Memory lifecycle phases — every memory transitions through these states.
@@ -208,15 +215,18 @@ inline MemoryType memoryTypeFromString(const std::string& s) {
 
 inline std::string memoryTierToString(MemoryTier tier) {
     switch (tier) {
-        case MemoryTier::Ephemeral:     return "ephemeral";
-        case MemoryTier::Consolidated:  return "consolidated";
+        case MemoryTier::Working:    return "working";
+        case MemoryTier::ShortTerm:  return "short_term";
+        case MemoryTier::LongTerm:   return "long_term";
     }
     return "unknown";
 }
 
 inline MemoryTier memoryTierFromString(const std::string& s) {
-    if (s == "consolidated") return MemoryTier::Consolidated;
-    return MemoryTier::Ephemeral;  // default
+    if (s == "short_term" || s == "consolidated") return MemoryTier::ShortTerm;
+    if (s == "long_term") return MemoryTier::LongTerm;
+    // "working", "ephemeral", or anything else → Working (backward compat)
+    return MemoryTier::Working;
 }
 
 /// Returns the recommended default scope for a given memory type.

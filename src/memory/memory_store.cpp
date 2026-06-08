@@ -1,6 +1,7 @@
 #include "memory_store.h"
 
 #include <algorithm>
+#include <cmath>
 #include <spdlog/spdlog.h>
 #include <filesystem>
 
@@ -115,6 +116,34 @@ Result<uint64_t> MemoryStore::fastStore(MemoryRecord record) {
     return mid;
 }
 
+bool MemoryStore::contains(uint64_t memory_id) const {
+    // Check cache first (read-only, no side effects)
+    {
+        std::shared_lock lock(mutex_);
+        if (cache_.count(memory_id)) return true;
+    }
+    // Fall back to LSM
+    return lsm_->get(memory_id).has_value();
+}
+
+Result<MemoryRecord> MemoryStore::peek(uint64_t memory_id) const {
+    // Read-only access: no access_count increment, no tier promotion.
+    // Used by internal pipelines (Stage 2 refinement, forget matching, etc.).
+    {
+        std::shared_lock lock(mutex_);
+        auto it = cache_.find(memory_id);
+        if (it != cache_.end()) {
+            return it->second;
+        }
+    }
+    // Fall back to LSM
+    auto raw = lsm_->get(memory_id);
+    if (!raw.has_value()) {
+        return makeError(Error::NotFound, "memory not found: " + std::to_string(memory_id));
+    }
+    return MemoryRecord::deserialize(raw.value());
+}
+
 Result<MemoryRecord> MemoryStore::get(uint64_t memory_id) {
     // Fast path: check cache under exclusive lock (needed for access_count mutation)
     {
@@ -123,6 +152,7 @@ Result<MemoryRecord> MemoryStore::get(uint64_t memory_id) {
         if (it != cache_.end()) {
             it->second.access_count++;
             it->second.last_accessed = MemoryRecord::currentTimeSec();
+            tryPromote(it->second);
             return it->second;
         }
     }
@@ -147,6 +177,7 @@ Result<MemoryRecord> MemoryStore::get(uint64_t memory_id) {
         it->second.access_count++;
         it->second.last_accessed = MemoryRecord::currentTimeSec();
     }
+    tryPromote(it->second);
     return it->second;
 }
 
@@ -327,19 +358,91 @@ std::vector<std::pair<uint64_t, float>> MemoryStore::findConflicts(
     return conflicts;
 }
 
+void MemoryStore::tryPromote(MemoryRecord& record) {
+    // Access-driven tier promotion (called under exclusive lock).
+    // Working→ShortTerm: access_count >= threshold OR importance >= threshold
+    // ShortTerm→LongTerm: access_count >= threshold AND importance >= threshold
+    if (record.tier == MemoryTier::Working) {
+        if (record.access_count >= config_.promotion_working_access_count
+            || record.importance >= config_.promotion_working_importance) {
+            spdlog::debug("Tier promotion: memory {} Working → ShortTerm "
+                         "(access={}, importance={:.3f})",
+                         record.memory_id, record.access_count, record.importance);
+            record.tier = MemoryTier::ShortTerm;
+        }
+    } else if (record.tier == MemoryTier::ShortTerm) {
+        if (record.access_count >= config_.promotion_short_access_count
+            && record.importance >= config_.promotion_short_importance) {
+            spdlog::debug("Tier promotion: memory {} ShortTerm → LongTerm "
+                         "(access={}, importance={:.3f})",
+                         record.memory_id, record.access_count, record.importance);
+            record.tier = MemoryTier::LongTerm;
+        }
+    }
+    // LongTerm: no further promotion.
+}
+
 void MemoryStore::applyDecay() {
     std::unique_lock lock(mutex_);
     auto now = MemoryRecord::currentTimeSec();
+
+    // Tier-aware decay multipliers: Working decays fastest, LongTerm slowest.
+    // Multiplier is applied to the base decay_rate.
+    static constexpr float kTierDecayMultiplier[] = {
+        2.0f,  // Working   — fast decay (×2.0)
+        1.0f,  // ShortTerm — baseline   (×1.0)
+        0.5f,  // LongTerm  — slow decay (×0.5)
+    };
+
+    // Tier-aware staleness thresholds (hours before marking Stale).
+    static constexpr float kTierStaleHours[] = {
+        72.0f,   // Working   — 3 days
+        360.0f,  // ShortTerm — 15 days
+        720.0f,  // LongTerm  — 30 days
+    };
+
+    // Demotion threshold: if importance drops below this, demote one tier level.
+    static constexpr float kDemotionThreshold = 0.1f;
+
     for (auto& [id, record] : cache_) {
         if (!record.isActive()) continue;
         float age_hours = static_cast<float>(now - record.last_accessed) / 3600.0f;
-        record.importance *= (1.0f - config_.decay_rate * age_hours / 24.0f);
+
+        // Apply tier-differentiated decay
+        uint8_t tier_idx = static_cast<uint8_t>(record.tier);
+        if (tier_idx > 2) tier_idx = 0;  // safety
+        float multiplier = kTierDecayMultiplier[tier_idx];
+
+        if (config_.exponential_decay_enabled) {
+            // Exponential decay: R = importance * e^(-rate * mult * t/24)
+            // More accurate but slightly more expensive.
+            float exponent = -config_.decay_rate * multiplier * age_hours / 24.0f;
+            record.importance *= std::exp(exponent);
+        } else {
+            // Linear decay (default): importance *= (1 - rate * mult * t/24)
+            record.importance *= (1.0f - config_.decay_rate * multiplier * age_hours / 24.0f);
+        }
         if (record.importance < 0.0f) record.importance = 0.0f;
 
-        // Mark stale if threshold exceeded
-        if (age_hours > static_cast<float>(config_.stale_threshold_hours)
+        // Mark stale if tier-specific threshold exceeded
+        float stale_hours = kTierStaleHours[tier_idx];
+        if (age_hours > stale_hours
             && record.confidence_level != Confidence::Verified) {
             record.confidence_level = Confidence::Stale;
+        }
+
+        // Demotion: if importance drops too low, demote one tier level.
+        // LongTerm→ShortTerm or ShortTerm→Working. Working cannot demote further.
+        if (record.importance < kDemotionThreshold && record.tier != MemoryTier::Working) {
+            auto old_tier = record.tier;
+            if (record.tier == MemoryTier::LongTerm) {
+                record.tier = MemoryTier::ShortTerm;
+            } else if (record.tier == MemoryTier::ShortTerm) {
+                record.tier = MemoryTier::Working;
+            }
+            spdlog::debug("Decay demotion: memory {} tier {} → {} (importance={:.3f})",
+                         id, memoryTierToString(old_tier), memoryTierToString(record.tier),
+                         record.importance);
         }
     }
 }

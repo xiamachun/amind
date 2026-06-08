@@ -42,6 +42,27 @@ struct V2Config {
     /// set. Applied post-rank, storage untouched. See src/retrieval/staleness_filter.h.
     bool aggregate_staleness_filter_enabled{true};
 
+    // ── Three-tier memory lifecycle gates ────────────────────────────────
+
+    /// Agent store routing: route capture/recall to per-agent stores.
+    /// Default true — this is the architectural foundation.
+    bool agent_store_routing_enabled{true};
+
+    /// Tiered decay: apply tier-differentiated decay multipliers in applyDecay().
+    bool tiered_decay_enabled{false};
+
+    /// Exponential decay: use e^(-t/S) instead of linear decay.
+    bool exponential_decay_enabled{false};
+
+    /// Access-driven promotion: promote memories on get() when thresholds are met.
+    bool access_promotion_enabled{false};
+
+    /// Recency gate: use multiplicative recency gating in recall scoring.
+    bool recency_gate_enabled{false};
+
+    /// Tier demotion: demote memories when importance drops below threshold.
+    bool tier_demotion_enabled{false};
+
     // ── Shadow mode overrides ────────────────────────────────────────────
 
     /// When true, V2 features compute but don't enforce (shadow mode).
@@ -64,6 +85,12 @@ public:
     bool isConsolidationEnabled() const;
     bool isReconcileEnabled() const;
     bool isAggregateStalenessFilterEnabled() const;
+    bool isAgentStoreRoutingEnabled() const;
+    bool isTieredDecayEnabled() const;
+    bool isExponentialDecayEnabled() const;
+    bool isAccessPromotionEnabled() const;
+    bool isRecencyGateEnabled() const;
+    bool isTierDemotionEnabled() const;
     bool isGlobalShadowMode() const;
 
     /// Check if a named feature is enabled (for generic access).
@@ -78,6 +105,12 @@ public:
     void setConflictResolverEnabled(bool enabled);
     void setConsolidationEnabled(bool enabled);
     void setReconcileEnabled(bool enabled);
+    void setAgentStoreRoutingEnabled(bool enabled);
+    void setTieredDecayEnabled(bool enabled);
+    void setExponentialDecayEnabled(bool enabled);
+    void setAccessPromotionEnabled(bool enabled);
+    void setRecencyGateEnabled(bool enabled);
+    void setTierDemotionEnabled(bool enabled);
     void setGlobalShadowMode(bool enabled);
 
     /// Enable all V2 features (for testing or full rollout).

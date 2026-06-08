@@ -55,10 +55,21 @@ ScoredResult RecallScorer::score(const RecallCandidate& candidate,
     result.importanceScore = std::clamp(candidate.importance, 0.0f, 1.0f);
     result.frequencyScore = computeFrequencyScore(candidate.accessCount);
 
-    result.totalScore = weights_.semantic * result.semanticScore
-                      + weights_.recency * result.recencyScore
-                      + weights_.importance * result.importanceScore
-                      + weights_.frequency * result.frequencyScore;
+    if (weights_.recencyGateEnabled) {
+        // Multiplicative gating: baseScore × recencyGate
+        // The recency component acts as a 0-1 multiplier on the entire score,
+        // ensuring very old memories are suppressed regardless of semantic match.
+        float baseScore = weights_.semantic * result.semanticScore
+                        + weights_.importance * result.importanceScore
+                        + weights_.frequency * result.frequencyScore;
+        result.totalScore = baseScore * result.recencyScore;
+    } else {
+        // Additive mode (default): traditional weighted sum
+        result.totalScore = weights_.semantic * result.semanticScore
+                          + weights_.recency * result.recencyScore
+                          + weights_.importance * result.importanceScore
+                          + weights_.frequency * result.frequencyScore;
+    }
 
     return result;
 }

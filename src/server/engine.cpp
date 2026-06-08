@@ -210,6 +210,12 @@ Result<void, Error> Engine::init() {
     v2_cfg.reconcile_enabled         = config_.get("v2_reconcile_enabled", "false") == "true";
     v2_cfg.aggregate_staleness_filter_enabled
         = config_.get("v2_aggregate_staleness_filter", "true") == "true";
+    v2_cfg.agent_store_routing_enabled = config_.get("v2_agent_store_routing", "true") == "true";
+    v2_cfg.tiered_decay_enabled      = config_.get("v2_tiered_decay_enabled", "false") == "true";
+    v2_cfg.exponential_decay_enabled = config_.get("v2_exponential_decay_enabled", "false") == "true";
+    v2_cfg.access_promotion_enabled  = config_.get("v2_access_promotion_enabled", "false") == "true";
+    v2_cfg.recency_gate_enabled      = config_.get("v2_recency_gate_enabled", "false") == "true";
+    v2_cfg.tier_demotion_enabled     = config_.get("v2_tier_demotion_enabled", "false") == "true";
     v2_cfg.global_shadow_mode        = config_.get("v2_global_shadow_mode", "false") == "true";
     feature_gate_ = std::make_unique<FeatureGate>(v2_cfg);
 
@@ -291,38 +297,31 @@ Result<void, Error> Engine::init() {
     spdlog::info("V2 subsystems initialized (feature_gate={} features enabled, shadow={})",
                  feature_gate_->enabledCount(), v2_cfg.global_shadow_mode ? "on" : "off");
 
-    // Business logic layers
-    capture_ = std::make_unique<CapturePipeline>(
-        memoryStore(), graphStore(), *task_queue_, llm_, embedder_,
-        feature_gate_.get(), derived_extractor_.get(), write_gate_.get());
-    capture_->setEventsLog(events_log_.get());
-    capture_->setReconciler(reconciler_.get());
+    // ── Per-agent CapturePipeline + RetrievalPipeline (physical isolation) ──
+    // Each agent gets its own Pipeline bound to its own MemoryStore + GraphStore.
+    // Shared components (LLM, Embed, TaskQueue, FeatureGate, WriteGate, etc.)
+    // are passed by pointer/shared_ptr — they are thread-safe singletons.
+    retrieval_weights_.semantic = config_.getFloat("semantic_weight", 0.4f);
+    retrieval_weights_.keyword = config_.getFloat("keyword_weight", 0.25f);
+    retrieval_weights_.graph = config_.getFloat("graph_weight", 0.15f);
+    retrieval_weights_.recency = config_.getFloat("recency_weight", 0.1f);
+    retrieval_weights_.importance = config_.getFloat("importance_weight", 0.1f);
+    retrieval_weights_.recency_gate_enabled = config_.get("recency_gate_enabled", "false") == "true";
 
-    RetrievalWeights weights;
-    weights.semantic = config_.getFloat("semantic_weight", 0.4f);
-    weights.keyword = config_.getFloat("keyword_weight", 0.25f);
-    weights.graph = config_.getFloat("graph_weight", 0.15f);
-    weights.recency = config_.getFloat("recency_weight", 0.1f);
-    weights.importance = config_.getFloat("importance_weight", 0.1f);
-
-    retrieval_ = std::make_unique<RetrievalPipeline>(
-        memoryStore(), graphStore(), llm_, embedder_, weights);
-    retrieval_->setCapturePipeline(capture_.get());
-
-    // Aggregate staleness filter (V2). Reads its own flag and persists
-    // an audit log of every filter event next to gate.log / forget.log.
+    // Aggregate staleness filter (shared across agents)
     if (v2_cfg.aggregate_staleness_filter_enabled) {
         AggregateStalenessFilter::Config sf_cfg;
         sf_cfg.enabled = true;
         staleness_filter_ = std::make_unique<AggregateStalenessFilter>(sf_cfg);
-        // RecallStale events go into the unified events.log instead of a
-        // dedicated recall_stale.log (kept around until Phase 4 cleanup).
-        retrieval_->setStalenessFilter(staleness_filter_.get(), events_log_.get());
         spdlog::info("Aggregate staleness filter enabled (emits to events.log)");
     }
 
+    for (auto& [id, store] : agent_stores_) {
+        initAgentPipelines(*store, retrieval_weights_);
+    }
+
     metacog_ = std::make_unique<MetaCognition>(memoryStore(), graphStore());
-    session_mgr_ = std::make_unique<SessionManager>(memoryStore(), llm_, *capture_,
+    session_mgr_ = std::make_unique<SessionManager>(memoryStore(), llm_, capturePipeline(),
                                                      config_.get("data_dir", "./amind_data"));
     backup_mgr_ = std::make_unique<BackupManager>(memoryStore(), graphStore());
     auth_mgr_ = std::make_unique<AuthManager>(memoryStore());
@@ -394,7 +393,19 @@ Engine::ForgetCycleResult Engine::runForgetCycleOnce() {
 
                 ForgetSignals sig;
                 float hours_since_access = (now - rec.last_accessed) / 3600.0f;
-                sig.staleness = std::min(1.0f, hours_since_access / stale_hours);
+
+                // Tier-aware staleness: higher-tier memories are given more
+                // time before being considered stale by the GC.
+                static constexpr float kTierStalenessMultiplier[] = {
+                    1.0f,  // Working   — baseline
+                    2.0f,  // ShortTerm — 2× more tolerant
+                    4.0f,  // LongTerm  — 4× more tolerant
+                };
+                uint8_t tier_idx = static_cast<uint8_t>(rec.tier);
+                if (tier_idx > 2) tier_idx = 0;
+                float effective_stale = stale_hours * kTierStalenessMultiplier[tier_idx];
+                sig.staleness = std::min(1.0f, hours_since_access / effective_stale);
+
                 sig.low_access = std::max(0.0f, 1.0f - std::log(1.0f + rec.access_count) / 5.0f);
                 sig.low_importance = 1.0f - rec.importance;
                 sig.conflict_penalty = (rec.confidence_level == Confidence::Conflicted) ? 1.0f : 0.0f;
@@ -570,7 +581,7 @@ Engine::ConsolidationCycleResult Engine::runConsolidationCycleOnce() {
                         // Find which store owns this memory_id and remove from it
                         std::lock_guard<std::mutex> lk(agent_stores_mutex_);
                         for (auto& [aid, store] : agent_stores_) {
-                            if (store->memory->get(archived_id).ok()) {
+                            if (store->memory->contains(archived_id)) {
                                 store->memory->remove(archived_id);
                                 break;
                             }
@@ -629,7 +640,7 @@ Engine::ConsolidationCycleResult Engine::runConsolidationCycleOnce() {
             {
                 std::lock_guard<std::mutex> lk(agent_stores_mutex_);
                 for (auto& [aid, store] : agent_stores_) {
-                    if (store->memory->get(rec.memory_id).ok()) {
+                    if (store->memory->contains(rec.memory_id)) {
                         owner_store = store->memory.get();
                         break;
                     }
@@ -641,7 +652,7 @@ Engine::ConsolidationCycleResult Engine::runConsolidationCycleOnce() {
             for (const auto& [nid, sim] : neighbors) {
                 if (nid == rec.memory_id) continue;
                 if (sim < dedup_threshold) continue;
-                auto nrec = owner_store->get(nid);
+                auto nrec = owner_store->peek(nid);
                 if (!nrec.ok() || !nrec->isAlive()) continue;
                 uint64_t to_archive = (rec.importance >= nrec->importance)
                                       ? nid : rec.memory_id;
@@ -833,8 +844,11 @@ void Engine::registerCallbacks() {
                               "recency_weight", "importance_weight"}) {
         std::string short_name(name);
         short_name = short_name.substr(0, short_name.find("_weight"));
-        var_mgr_->onChange(name, [this, short_name](auto&, auto& v) {
-            retrieval_->setWeight(short_name, std::stof(v));
+        var_mgr_->onChange(name, [this, short_name](auto& /*name*/, auto& v) {
+            std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+            for (auto& [id, store] : agent_stores_) {
+                store->retrieval->setWeight(short_name, std::stof(v));
+            }
         });
     }
 
@@ -918,6 +932,11 @@ Result<void, Error> Engine::initAgentStore(AgentStore& store) {
     sc.stale_threshold_hours = static_cast<uint32_t>(config_.getInt("stale_threshold_hours", 720));
     sc.decay_rate = config_.getFloat("decay_rate", 0.01f);
     sc.importance_boost = config_.getFloat("importance_boost", 0.1f);
+    sc.exponential_decay_enabled = config_.get("exponential_decay_enabled", "false") == "true";
+    sc.promotion_working_access_count = static_cast<uint32_t>(config_.getInt("promotion_working_access_count", 3));
+    sc.promotion_working_importance = config_.getFloat("promotion_working_importance", 0.6f);
+    sc.promotion_short_access_count = static_cast<uint32_t>(config_.getInt("promotion_short_access_count", 10));
+    sc.promotion_short_importance = config_.getFloat("promotion_short_importance", 0.7f);
     sc.hnsw_max_connections = static_cast<size_t>(config_.getInt("hnsw_max_connections", 16));
     sc.hnsw_ef_construction = static_cast<size_t>(config_.getInt("hnsw_ef_construction", 200));
     sc.hnsw_hot_capacity = static_cast<size_t>(config_.getInt("hot_capacity", 50000));
@@ -941,6 +960,24 @@ Result<void, Error> Engine::initAgentStore(AgentStore& store) {
     return Result<void, Error>();
 }
 
+void Engine::initAgentPipelines(AgentStore& store, const RetrievalWeights& weights) {
+    store.capture = std::make_unique<CapturePipeline>(
+        *store.memory, *store.graph, *task_queue_, llm_, embedder_,
+        feature_gate_.get(), derived_extractor_.get(), write_gate_.get());
+    store.capture->setEventsLog(events_log_.get());
+    store.capture->setReconciler(reconciler_.get());
+
+    store.retrieval = std::make_unique<RetrievalPipeline>(
+        *store.memory, *store.graph, llm_, embedder_, weights);
+    store.retrieval->setCapturePipeline(store.capture.get());
+
+    if (staleness_filter_) {
+        store.retrieval->setStalenessFilter(staleness_filter_.get(), events_log_.get());
+    }
+
+    spdlog::info("AgentStore pipelines initialized: agent_id={}", store.agent_id);
+}
+
 Result<void, Error> Engine::registerAgent(const std::string& agent_id,
                                            const std::string& display_name,
                                            const std::string& domain) {
@@ -956,6 +993,7 @@ Result<void, Error> Engine::registerAgent(const std::string& agent_id,
 
     auto result = initAgentStore(*store);
     if (!result.ok()) return result;
+    initAgentPipelines(*store, retrieval_weights_);
 
     agent_stores_[agent_id] = std::move(store);
     saveAgentsMeta();
@@ -975,9 +1013,9 @@ Engine::AgentStore& Engine::getAgentStore(const std::string& agent_id) {
     auto result = initAgentStore(*store);
     if (!result.ok()) {
         spdlog::error("Failed to auto-create AgentStore {}: {}", agent_id, result.error().message);
-        // Fatal — should not happen in normal operation
         throw std::runtime_error("Failed to create AgentStore: " + agent_id);
     }
+    initAgentPipelines(*store, retrieval_weights_);
     auto& ref = *store;
     agent_stores_[agent_id] = std::move(store);
     saveAgentsMeta();
@@ -988,6 +1026,16 @@ Engine::AgentStore* Engine::findAgentStore(const std::string& agent_id) {
     std::lock_guard<std::mutex> lk(agent_stores_mutex_);
     auto it = agent_stores_.find(agent_id);
     return it != agent_stores_.end() ? it->second.get() : nullptr;
+}
+
+Engine::AgentStore* Engine::findStoreForMemory(uint64_t memory_id) {
+    std::lock_guard<std::mutex> lk(agent_stores_mutex_);
+    for (auto& [aid, store] : agent_stores_) {
+        if (store->memory->contains(memory_id)) {
+            return store.get();
+        }
+    }
+    return nullptr;
 }
 
 std::vector<std::string> Engine::listAgents() const {

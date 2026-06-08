@@ -94,7 +94,7 @@ struct MemoryRecord {
     std::string agent_id;                          // owning agent ID
     MemoryScope scope{MemoryScope::Private};       // visibility scope
     MemoryType memory_type{MemoryType::Ephemeral}; // semantic type
-    MemoryTier tier{MemoryTier::Ephemeral};        // quality tier (fast/slow)
+    MemoryTier tier{MemoryTier::Working};           // quality tier (working/short/long)
     MemoryPhase phase{MemoryPhase::Active};
     Confidence confidence_level{Confidence::Inferred};
     float confidence_score{0.5f};                  // numeric confidence [0.0, 1.0]

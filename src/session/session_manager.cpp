@@ -139,7 +139,7 @@ Result<void, Error> SessionManager::closeSession(uint64_t session_id) {
     // Verify persisted memories count
     size_t persisted = 0;
     for (auto mid : it->second.memory_ids) {
-        auto rec = store_.get(mid);
+        auto rec = store_.peek(mid);
         if (rec.ok()) ++persisted;
     }
     spdlog::info("Session closed: id={}, turns={}, memories={}/{} persisted, facts={}",

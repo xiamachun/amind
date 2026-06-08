@@ -34,11 +34,11 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
 
     // 0. Freshness barrier: if there are recently-submitted Stage 2 tasks for
     //    this agent, wait for them to complete so recall sees the latest state.
-    //    Only triggers when writes were submitted within the last 5 seconds.
     if (capture_pipeline_ && !agent_id.empty()) {
-        // Note: We might need a new mechanism for agent-based flight info, 
-        // but for now we skip or use a dummy hash if the old one was ns-based.
-        // Assuming capture_pipeline has been updated to handle agent_id or global flight.
+        uint64_t flight_key = std::hash<std::string>{}(agent_id);
+        if (capture_pipeline_->hasFreshPending(flight_key)) {
+            capture_pipeline_->waitForPendingRefinements(flight_key);
+        }
     }
 
     // 1. Optionally analyze intent
@@ -114,12 +114,25 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
             static_cast<float>(neighbors.size()) * 0.05f);
 
         // Fuse all scores
-        scored.total_score =
-            w.semantic * scored.semantic_score +
-            w.keyword * scored.keyword_score +
-            w.recency * scored.recency_score +
-            w.graph * scored.graph_score +
-            w.importance * scored.record.importance;
+        if (w.recency_gate_enabled) {
+            // Multiplicative gating: recency acts as a 0-1 multiplier on
+            // the entire score, suppressing very old memories regardless
+            // of semantic match quality.
+            float base_score =
+                w.semantic * scored.semantic_score +
+                w.keyword * scored.keyword_score +
+                w.graph * scored.graph_score +
+                w.importance * scored.record.importance;
+            scored.total_score = base_score * scored.recency_score;
+        } else {
+            // Additive mode (default): traditional weighted sum
+            scored.total_score =
+                w.semantic * scored.semantic_score +
+                w.keyword * scored.keyword_score +
+                w.recency * scored.recency_score +
+                w.graph * scored.graph_score +
+                w.importance * scored.record.importance;
+        }
 
         candidates.push_back(std::move(scored));
         candidate_ids.insert(memory_id);

@@ -10,15 +10,28 @@
 namespace amind {
 
 /// Weights for the recall scoring formula.
-/// score = α×semantic + β×recency + γ×importance + δ×frequency
+///
+/// Default (additive):
+///   score = α×semantic + β×recency + γ×importance + δ×frequency
+///
+/// With recency gate enabled (multiplicative):
+///   baseScore = α×semantic + γ×importance + δ×frequency
+///   recencyGate = e^(-decayRate × hours_since)
+///   score = baseScore × recencyGate
+///
+/// The multiplicative gate ensures that very old memories are suppressed
+/// regardless of semantic match quality (avoids stale-but-similar noise).
 struct RecallWeights {
     float semantic = 0.6f;     // α: cosine similarity weight (dominant)
-    float recency = 0.2f;      // β: time recency weight
+    float recency = 0.2f;      // β: time recency weight (unused when gate mode)
     float importance = 0.1f;   // γ: importance weight
     float frequency = 0.1f;    // δ: access frequency weight
 
     /// Recency decay rate: e^(-decayRate × hours_since)
     float decayRate = 0.01f;
+
+    /// When true, use multiplicative recency gating instead of additive recency.
+    bool recencyGateEnabled = false;
 };
 
 /// Input data for scoring a single memory candidate.

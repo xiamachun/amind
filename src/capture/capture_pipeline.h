@@ -76,7 +76,8 @@ public:
     /// `trace_id` carries the observability trace across the Stage 1 → Stage 2
     /// boundary so all emitted events (Embed/Gate/Derive/Reconcile) group
     /// together. 0 = no trace context.
-    void scheduleRefinement(uint64_t memory_id, 
+    void scheduleRefinement(uint64_t memory_id,
+                            const std::string& agent_id,
                             bool pre_extracted = false,
                             uint64_t trace_id = 0);
 

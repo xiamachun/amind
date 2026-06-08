@@ -120,7 +120,7 @@ Result<void, Error> AuthManager::revokeKey(const std::string& key_id) {
         return Error{Error::InvalidArgument, "invalid key ID"};
     }
 
-    auto rec_result = store_.get(id);
+    auto rec_result = store_.peek(id);
     if (!rec_result.ok()) return rec_result.error();
 
     auto& rec = *rec_result;

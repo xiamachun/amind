@@ -28,6 +28,13 @@ public:
         uint32_t stale_threshold_hours = 720;
         float decay_rate = 0.01f;
         float importance_boost = 0.1f;
+        bool exponential_decay_enabled = false;  // Use e^(-t/S) instead of linear decay
+
+        // Tiered memory promotion thresholds (configurable)
+        uint32_t promotion_working_access_count = 3;     // Working→ShortTerm: access_count >= N
+        float promotion_working_importance = 0.6f;        // Working→ShortTerm: OR importance >= X
+        uint32_t promotion_short_access_count = 10;       // ShortTerm→LongTerm: access_count >= N
+        float promotion_short_importance = 0.7f;          // ShortTerm→LongTerm: AND importance >= X
 
         // HNSW index parameters
         size_t hnsw_max_connections = 16;
@@ -55,8 +62,15 @@ public:
     /// Stage 1: Fast store — write to LSM + HNSW, return memory_id immediately.
     Result<uint64_t> fastStore(MemoryRecord record);
 
-    /// Get a memory by ID.
+    /// Get a memory by ID (increments access_count and may trigger tier promotion).
     Result<MemoryRecord> get(uint64_t memory_id);
+
+    /// Check if a memory exists without side effects (no access_count increment).
+    bool contains(uint64_t memory_id) const;
+
+    /// Read a memory without side effects (no access_count increment, no promotion).
+    /// Use this for internal/pipeline reads where access should not be counted.
+    Result<MemoryRecord> peek(uint64_t memory_id) const;
 
     /// Update a memory (creates new version, marks old as Versioned).
     Result<uint64_t> update(uint64_t memory_id, const std::string& new_content,
@@ -143,6 +157,10 @@ private:
     std::unordered_map<uint64_t, MemoryRecord> cache_;
 
     void evictIfNeeded();
+
+    /// Access-driven tier promotion. Called under exclusive lock.
+    /// Checks if a memory should be promoted based on access_count and importance.
+    void tryPromote(MemoryRecord& record);
 };
 
 }  // namespace amind

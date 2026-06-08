@@ -52,6 +52,9 @@ public:
     // ========== Agent Management ==========
 
     /// Per-agent isolated storage container.
+    /// Each agent owns its own MemoryStore (with HNSW), GraphStore, LineageIndex,
+    /// CapturePipeline and RetrievalPipeline — ensuring complete physical isolation
+    /// at both storage and data-flow levels.
     struct AgentStore {
         std::string agent_id;
         std::string display_name;
@@ -59,6 +62,8 @@ public:
         std::unique_ptr<MemoryStore> memory;
         std::unique_ptr<GraphStore> graph;
         std::unique_ptr<LineageIndex> lineage;
+        std::unique_ptr<CapturePipeline> capture;
+        std::unique_ptr<RetrievalPipeline> retrieval;
     };
 
     /// Register a new agent. Creates its AgentStore and data directories.
@@ -72,19 +77,35 @@ public:
     /// Get AgentStore pointer (null if not found, does not auto-create).
     AgentStore* findAgentStore(const std::string& agent_id);
 
+    /// Find which AgentStore owns a given memory_id.
+    /// Returns nullptr if the memory is not found in any store.
+    AgentStore* findStoreForMemory(uint64_t memory_id);
+
     /// List all registered agent IDs.
     std::vector<std::string> listAgents() const;
 
     /// Remove an agent and all its data.
     Result<void, Error> removeAgent(const std::string& agent_id);
 
+    // ========== Agent-routed Accessors ==========
+
+    /// Get the CapturePipeline for a specific agent (physically isolated).
+    CapturePipeline& capturePipelineFor(const std::string& agent_id) {
+        return *getAgentStore(agent_id).capture;
+    }
+    /// Get the RetrievalPipeline for a specific agent (physically isolated).
+    RetrievalPipeline& retrievalPipelineFor(const std::string& agent_id) {
+        return *getAgentStore(agent_id).retrieval;
+    }
+
     // ========== Legacy Accessors (delegate to default AgentStore) ==========
 
-    // Accessors for subsystems
     MemoryStore& memoryStore() { return *getAgentStore("default").memory; }
     GraphStore& graphStore() { return *getAgentStore("default").graph; }
-    CapturePipeline& capturePipeline() { return *capture_; }
-    RetrievalPipeline& retrievalPipeline() { return *retrieval_; }
+    /// @deprecated Use capturePipelineFor(agent_id) for agent-isolated access.
+    CapturePipeline& capturePipeline() { return *getAgentStore("default").capture; }
+    /// @deprecated Use retrievalPipelineFor(agent_id) for agent-isolated access.
+    RetrievalPipeline& retrievalPipeline() { return *getAgentStore("default").retrieval; }
     MetaCognition& metaCognition() { return *metacog_; }
     SessionManager& sessionManager() { return *session_mgr_; }
     BackupManager& backupManager() { return *backup_mgr_; }
@@ -140,8 +161,7 @@ private:
     std::unique_ptr<TaskExecutor> task_executor_;
     std::shared_ptr<LLMProvider> llm_;
     std::shared_ptr<EmbedProvider> embedder_;
-    std::unique_ptr<CapturePipeline> capture_;
-    std::unique_ptr<RetrievalPipeline> retrieval_;
+    // capture_ and retrieval_ removed — now per-agent in AgentStore.
     std::unique_ptr<MetaCognition> metacog_;
     std::unique_ptr<SessionManager> session_mgr_;
     std::unique_ptr<BackupManager> backup_mgr_;
@@ -177,8 +197,10 @@ private:
     std::string agents_meta_path_;  // path to agents.json
 
     Result<void, Error> initAgentStore(AgentStore& store);
+    void initAgentPipelines(AgentStore& store, const RetrievalWeights& weights);
     void loadAgentsMeta();
     void saveAgentsMeta();
+    RetrievalWeights retrieval_weights_;  // cached for dynamic agent creation
 };
 
 }  // namespace amind

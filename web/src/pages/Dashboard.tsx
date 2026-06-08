@@ -34,6 +34,8 @@ export default function Dashboard() {
 
   const ownerData = Object.entries(coverage.scope_distribution || {}).map(([name, value]) => ({ name, value }))
   const phaseData = Object.entries(coverage.phase_distribution || {}).map(([name, value]) => ({ name, value }))
+  const tierData = Object.entries(coverage.tier_distribution || {}).map(([name, value]) => ({ name, value }))
+  const typeData = Object.entries(coverage.memory_type_distribution || {}).map(([name, value]) => ({ name, value }))
 
   return (
     <div className="space-y-6">
@@ -72,6 +74,36 @@ export default function Dashboard() {
               <Legend />
               <Bar dataKey="value" name="Count" radius={[6, 6, 0, 0]}>
                 {phaseData.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <h3 className="text-sm font-medium text-gray-400 mb-4">Memories by Tier</h3>
+          <ResponsiveContainer width="100%" height={260}>
+            <PieChart>
+              <Pie data={tierData} dataKey="value" nameKey="name" cx="50%" cy="50%"
+                outerRadius={90} label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}>
+                {tierData.map((_, i) => <Cell key={i} fill={['#22d3ee','#f59e0b','#10b981'][i % 3]} />)}
+              </Pie>
+              <Tooltip contentStyle={{ background: '#1f2937', border: '1px solid #374151', borderRadius: 8 }} />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <h3 className="text-sm font-medium text-gray-400 mb-4">Memories by Type</h3>
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={typeData}>
+              <XAxis dataKey="name" tick={{ fill: '#9ca3af', fontSize: 11 }} angle={-20} textAnchor="end" height={50} />
+              <YAxis tick={{ fill: '#9ca3af', fontSize: 12 }} />
+              <Tooltip contentStyle={{ background: '#1f2937', border: '1px solid #374151', borderRadius: 8 }} />
+              <Legend />
+              <Bar dataKey="value" name="Count" radius={[6, 6, 0, 0]}>
+                {typeData.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>

@@ -235,6 +235,42 @@ export default function MemoryDetail() {
           <p className="text-xs text-gray-500 uppercase mb-1">Content</p>
           <p className="text-gray-200 whitespace-pre-wrap leading-relaxed">{memory.content}</p>
         </div>
+        {/* Tier + Access Promotion bar */}
+        <div className="flex items-center gap-3 pt-3 border-t border-gray-800">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">Tier</span>
+            {memory.tier === 'long_term' ? (
+              <span className="text-xs px-2.5 py-1 rounded-md bg-emerald-900/50 text-emerald-300 border border-emerald-800 font-medium">
+                Long-Term
+              </span>
+            ) : memory.tier === 'short_term' ? (
+              <span className="text-xs px-2.5 py-1 rounded-md bg-amber-900/50 text-amber-300 border border-amber-800 font-medium">
+                Short-Term
+              </span>
+            ) : (
+              <span className="text-xs px-2.5 py-1 rounded-md bg-sky-900/50 text-sky-300 border border-sky-800 font-medium">
+                Working
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">Hits</span>
+            <span className="text-sm font-mono text-white bg-gray-800 px-2 py-0.5 rounded">{memory.access_count ?? 0}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">Type</span>
+            <span className="text-xs px-2 py-0.5 rounded-md bg-gray-800 text-gray-300 border border-gray-700">
+              {memory.memory_type || 'ephemeral'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">Scope</span>
+            <span className="text-xs px-2 py-0.5 rounded-md bg-gray-800 text-gray-300 border border-gray-700">
+              {memory.scope || 'private'}
+            </span>
+          </div>
+        </div>
+
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 pt-3 border-t border-gray-800">
           <div>
             <p className="text-xs text-gray-500">ID</p>
@@ -259,10 +295,6 @@ export default function MemoryDetail() {
           <div>
             <p className="text-xs text-gray-500">Version</p>
             <p className="text-sm text-gray-300">{memory.version}</p>
-          </div>
-          <div>
-            <p className="text-xs text-gray-500">Access Count</p>
-            <p className="text-sm text-gray-300">{memory.access_count}</p>
           </div>
           <div>
             <p className="text-xs text-gray-500">Embedding</p>

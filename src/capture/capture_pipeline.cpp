@@ -107,7 +107,7 @@ Result<std::vector<uint64_t>> CapturePipeline::capture(
                 int deleted = 0;
                 for (const auto& [mid, sim] : matches) {
                     if (sim < 0.30f) continue;
-                    auto rec = store_.get(mid);
+                    auto rec = store_.peek(mid);
                     if (!rec.ok() || !rec->isAlive()) continue;
                     if (rec->agent_id != agent_id) continue;
                     store_.remove(mid);
@@ -129,7 +129,7 @@ Result<std::vector<uint64_t>> CapturePipeline::capture(
     record.user_id = user_id;
     record.scope = scope;
     record.memory_type = memory_type;
-    record.tier = MemoryTier::Ephemeral; // Default to ephemeral for fast capture
+    record.tier = MemoryTier::Working; // Default to working tier for fast capture
     record.content = content;
     record.confidence_level = Confidence::Inferred;
     if (!user_metadata.empty()) {
@@ -160,26 +160,30 @@ Result<std::vector<uint64_t>> CapturePipeline::capture(
     }
 
     // Schedule Stage 2: embed + WriteGate + HNSW insert + fact extraction
-    scheduleRefinement(memory_id, pre_extracted, trace_id);
+    scheduleRefinement(memory_id, agent_id, pre_extracted, trace_id);
 
     return std::vector<uint64_t>{memory_id};
 }
 
-void CapturePipeline::scheduleRefinement(uint64_t memory_id, 
+void CapturePipeline::scheduleRefinement(uint64_t memory_id,
+                                         const std::string& agent_id,
                                          bool pre_extracted, uint64_t trace_id) {
-    // We fetch the record to get agent_id for filtering/flight info if needed, 
-    // but for now we just use memory_id as the key for flight info or remove ns_hash dependency.
-    // For simplicity in migration, we'll keep a dummy ns_hash or remove flight info if it was ns-based.
-    // Let's assume flight info is now per-agent or global for refinement.
-    
+    const uint64_t flight_key = std::hash<std::string>{}(agent_id);
+
     AsyncTask task;
     task.memory_id = memory_id;
     task.trace_id  = trace_id;
     task.task_type = "refine";
-    task.work = [this, memory_id, pre_extracted, trace_id]() {
+    task.work = [this, memory_id, flight_key, pre_extracted, trace_id]() {
+        // RAII guard: decrement flight counter on every exit path
+        struct FlightGuard {
+            CapturePipeline* self; uint64_t key;
+            ~FlightGuard() { self->decrementPending(key); }
+        } flight_guard{this, flight_key};
+
         if (!alive_.load(std::memory_order_relaxed)) return;
 
-        auto record_result = store_.get(memory_id);
+        auto record_result = store_.peek(memory_id);
         if (!record_result.ok()) return;
 
         auto& record = record_result.value();
@@ -194,7 +198,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
             if (embed_result.ok()) {
                 store_.setEmbedding(memory_id, std::move(*embed_result));
                 // Re-fetch with the embedding populated
-                record_result = store_.get(memory_id);
+                record_result = store_.peek(memory_id);
                 if (!record_result.ok()) return;
                 record = record_result.value();
                 if (events_log_) {
@@ -250,7 +254,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                         for (const auto& [mid, sim] : matches) {
                             if (mid == memory_id) continue;
                             if (sim < 0.30f) continue;
-                            auto rec = store_.get(mid);
+                            auto rec = store_.peek(mid);
                             if (!rec.ok() || !rec->isAlive()) continue;
                             if (rec->agent_id != record.agent_id) continue;
                             store_.remove(mid);
@@ -327,7 +331,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                     filtered.reserve(top_k);
                     for (const auto& [id, sim] : raw) {
                         if (id == memory_id) continue;  // exclude parent raw memory
-                        auto rec = store_.get(id);
+                        auto rec = store_.peek(id);
                         if (rec.ok() && rec->agent_id == agent_id && rec->layer == MemoryLayer::Derived) {
                             filtered.emplace_back(id, sim);
                             if (filtered.size() >= top_k) break;
@@ -385,7 +389,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                         auto raw_neigh = store_.searchSimilar(cand.embedding, 30);
                         for (const auto& [nid, sim] : raw_neigh) {
                             if (seen_ids.count(nid)) continue;
-                            auto rec = store_.get(nid);
+                            auto rec = store_.peek(nid);
                             if (!rec.ok() || rec->agent_id != target_agent_id) continue;
                             if (!rec->isAlive()) continue;
                             if (rec->layer != MemoryLayer::Derived) continue;
@@ -552,7 +556,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                             // Re-check: the target may have been tombstoned by
                             // a prior concurrent reconcile that finished while
                             // we waited for the lock. Refresh the neighbour.
-                            auto refreshed = store_.get(slot_key);
+                            auto refreshed = store_.peek(slot_key);
                             if (refreshed.ok() && !refreshed->isAlive()) {
                                 // Target was already superseded — re-search for
                                 // the current live version before deciding.
@@ -562,7 +566,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                 auto fresh_neigh = store_.searchSimilar(cand.embedding, 30);
                                 for (const auto& [nid, sim] : fresh_neigh) {
                                     if (seen_ids.count(nid)) continue;
-                                    auto rec = store_.get(nid);
+                                    auto rec = store_.peek(nid);
                                     if (!rec.ok() || rec->agent_id != target_agent_id) continue;
                                     if (!rec->isAlive()) continue;
                                     if (rec->layer != MemoryLayer::Derived) continue;
@@ -602,7 +606,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                 break;
                             case ReconcileOp::REPLACE: {
                                 // Tombstone the older fact + link new.parent_id = old.
-                                auto old_rec = store_.get(reconcile_decision.target_id);
+                                auto old_rec = store_.peek(reconcile_decision.target_id);
                                 store_.remove(reconcile_decision.target_id);
                                 graph_.addEdge(result.derived_id,
                                                reconcile_decision.target_id,
@@ -627,7 +631,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                         if (sid == result.derived_id) continue;
                                         if (sid >= result.derived_id) continue;
                                         if (sim < 0.35f) continue;
-                                        auto srec = store_.get(sid);
+                                        auto srec = store_.peek(sid);
                                         if (!srec.ok() || !srec->isAlive()) continue;
                                         if (srec->agent_id != target_agent_id) continue;
                                         if (srec->layer != MemoryLayer::Derived) continue;
@@ -662,7 +666,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                             case ReconcileOp::RETRACT: {
                                 // Tombstone target AND the just-stored fact
                                 // (the candidate is a negation, not new info).
-                                auto retract_rec = store_.get(reconcile_decision.target_id);
+                                auto retract_rec = store_.peek(reconcile_decision.target_id);
                                 store_.remove(reconcile_decision.target_id);
                                 store_.remove(result.derived_id);
                                 spdlog::info("Reconciler RETRACT: removed both {} and just-stored {} — {}",
@@ -680,7 +684,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                         if (sid == result.derived_id) continue;
                                         if (sid >= result.derived_id) continue;
                                         if (sim < 0.35f) continue;
-                                        auto srec = store_.get(sid);
+                                        auto srec = store_.peek(sid);
                                         if (!srec.ok() || !srec->isAlive()) continue;
                                         if (srec->agent_id != target_agent_id) continue;
                                         if (srec->layer != MemoryLayer::Derived) continue;
@@ -781,7 +785,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
             std::vector<std::pair<uint64_t, float>> neighbors;
             neighbors.reserve(10);
             for (const auto& [nid, score] : raw_neighbors) {
-                auto rec = store_.get(nid);
+                auto rec = store_.peek(nid);
                 if (rec.ok() && rec->agent_id == edge_agent_id) {
                     neighbors.emplace_back(nid, score);
                     if (neighbors.size() >= 10) break;
@@ -801,13 +805,12 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
     };
 
     // Freshness barrier: increment before push so recall can detect in-flight work
-    // Use memory_id as the key for tracking in-flight refinements
-    incrementPending(memory_id);
+    incrementPending(flight_key);
 
     auto push_result = queue_.push(std::move(task));
     if (!push_result.ok()) {
         // Push failed — decrement immediately since the task won't run
-        decrementPending(memory_id);
+        decrementPending(flight_key);
         spdlog::warn("Failed to schedule refinement for memory {}: {}",
                      memory_id, push_result.error().toString());
     }

@@ -43,6 +43,11 @@ struct RetrievalWeights {
     float graph{0.15f};
     float recency{0.1f};
     float importance{0.1f};
+
+    /// When true, recency acts as a multiplicative gate on the entire score
+    /// instead of an additive component. This suppresses very old memories
+    /// regardless of semantic match quality.
+    bool recency_gate_enabled{false};
 };
 
 /// Intent-aware hybrid retrieval pipeline.

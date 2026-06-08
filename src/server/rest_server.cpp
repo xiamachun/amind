@@ -413,7 +413,7 @@ std::string RestServer::handleStore(const std::string& body) {
             return jsonResponse(200, R"({"memory_ids":[],"filtered":"is_error metadata flag"})");
         }
 
-        auto result = engine_.capturePipeline().capture(
+        auto result = engine_.capturePipelineFor(agent_id).capture(
             content, agent_id, user_id, scope, memory_type, std::move(user_metadata));
         if (!result.ok()) {
             return errorResponse(500, result.error().toString());
@@ -453,7 +453,7 @@ std::string RestServer::handleRecall(const std::string& body) {
         // Over-fetch when filters are present so we still return ~top_k after pruning.
         size_t fetch_k = filters.empty() ? static_cast<size_t>(top_k)
                                          : static_cast<size_t>(top_k) * 4;
-        auto result = engine_.retrievalPipeline().recall(query, agent_id, user_id, fetch_k);
+        auto result = engine_.retrievalPipelineFor(agent_id).recall(query, agent_id, user_id, fetch_k);
         if (!result.ok()) {
             return errorResponse(500, result.error().toString());
         }
@@ -502,6 +502,10 @@ std::string RestServer::handleRecall(const std::string& body) {
             item["confidence"] = confidenceToString(sm.record.confidence_level);
             item["score"] = sm.total_score;
             item["semantic_score"] = sm.semantic_score;
+            item["importance"] = sm.record.importance;
+            item["access_count"] = sm.record.access_count;
+            item["created_at"] = sm.record.created_at;
+            item["last_accessed"] = sm.record.last_accessed;
             if (!sm.record.user_metadata.empty()) {
                 json meta = json::object();
                 for (const auto& [k, v] : sm.record.user_metadata) meta[k] = v;
@@ -522,7 +526,9 @@ std::string RestServer::handleRecall(const std::string& body) {
 std::string RestServer::handleGetMemory(const std::string& id_str) {
     try {
         uint64_t id = std::stoull(id_str);
-        auto result = engine_.memoryStore().get(id);
+        auto* store = engine_.findStoreForMemory(id);
+        if (!store) return errorResponse(404, "memory not found");
+        auto result = store->memory->get(id);
         if (!result.ok()) return errorResponse(404, "memory not found");
 
         json resp;
@@ -538,6 +544,9 @@ std::string RestServer::handleGetMemory(const std::string& id_str) {
         resp["version"] = result->mem_version;
         resp["parent_id"] = result->parent_id;
         resp["importance"] = result->importance;
+        resp["access_count"] = result->access_count;
+        resp["created_at"] = result->created_at;
+        resp["last_accessed"] = result->last_accessed;
         if (!result->user_metadata.empty()) {
             json meta = json::object();
             for (const auto& [k, v] : result->user_metadata) meta[k] = v;
@@ -552,7 +561,9 @@ std::string RestServer::handleGetMemory(const std::string& id_str) {
 std::string RestServer::handleGetHistory(const std::string& id_str) {
     try {
         uint64_t id = std::stoull(id_str);
-        auto result = engine_.memoryStore().getHistory(id);
+        auto* store = engine_.findStoreForMemory(id);
+        if (!store) return errorResponse(404, "not found");
+        auto result = store->memory->getHistory(id);
         if (!result.ok()) return errorResponse(404, "not found");
 
         json resp = json::array();
@@ -582,23 +593,23 @@ std::string RestServer::handleFeedback(const std::string& id_str, const std::str
 std::string RestServer::handleDeleteMemory(const std::string& id_str) {
     try {
         uint64_t id = std::stoull(id_str);
+        auto* store = engine_.findStoreForMemory(id);
+        if (!store) return errorResponse(404, "memory not found");
 
         // V2: Delegate to RemoveCoordinator when lineage propagation is enabled
         if (engine_.featureGate().isLineagePropagationEnabled()) {
-            auto get_record = [this](uint64_t mid) -> MemoryRecord* {
-                auto result = engine_.memoryStore().get(mid);
+            auto get_record = [store](uint64_t mid) -> MemoryRecord* {
+                auto result = store->memory->peek(mid);
                 if (!result.ok()) return nullptr;
-                // Store in temporary to return pointer (coordinator uses it transiently)
                 thread_local MemoryRecord tmp;
                 tmp = std::move(result.value());
                 return &tmp;
             };
-            auto persist = [this](uint64_t mid, const MemoryRecord& rec) {
-                // Re-serialize to LSM via update path
-                engine_.memoryStore().remove(mid);
+            auto persist = [store](uint64_t mid, const MemoryRecord& rec) {
+                store->memory->remove(mid);
             };
             auto hnsw_delete = [](uint64_t /*mid*/) {
-                // Already handled inside memoryStore().remove()
+                // Already handled inside memory->remove()
             };
 
             auto remove_result = engine_.removeCoordinator().remove(
@@ -609,9 +620,9 @@ std::string RestServer::handleDeleteMemory(const std::string& id_str) {
             }
 
             // Clean graph edges for primary + invalidated descendants
-            engine_.graphStore().removeNode(id);
+            store->graph->removeNode(id);
             for (uint64_t desc : remove_result.invalidated_descendants) {
-                engine_.graphStore().removeNode(desc);
+                store->graph->removeNode(desc);
             }
 
             json resp;
@@ -622,9 +633,9 @@ std::string RestServer::handleDeleteMemory(const std::string& id_str) {
         }
 
         // V1 fallback: direct remove
-        auto result = engine_.memoryStore().remove(id);
+        auto result = store->memory->remove(id);
         if (!result.ok()) return errorResponse(404, "not found");
-        engine_.graphStore().removeNode(id);
+        store->graph->removeNode(id);
         return jsonResponse(200, R"({"deleted":true})");
     } catch (...) {
         return errorResponse(400, "invalid ID");
@@ -634,7 +645,9 @@ std::string RestServer::handleDeleteMemory(const std::string& id_str) {
 std::string RestServer::handleArchiveMemory(const std::string& id_str) {
     try {
         uint64_t id = std::stoull(id_str);
-        auto result = engine_.memoryStore().archive(id);
+        auto* store = engine_.findStoreForMemory(id);
+        if (!store) return errorResponse(404, "not found");
+        auto result = store->memory->archive(id);
         if (!result.ok()) return errorResponse(404, "not found");
         return jsonResponse(200, R"({"archived":true})");
     } catch (...) {
@@ -643,21 +656,19 @@ std::string RestServer::handleArchiveMemory(const std::string& id_str) {
 }
 
 std::string RestServer::handleDeleteAgentMemories(const std::string& agent_id) {
-    // In the new architecture, we delete memories by agent_id.
-    // Note: This is a heavy operation. In production, this might be restricted or async.
-    // In new architecture, delete all memories from this agent's store via scanAll + remove
+    // Route to the correct agent's store for physical isolation.
+    auto& agent_store = engine_.getAgentStore(agent_id);
     std::vector<uint64_t> deleted_ids;
-    engine_.memoryStore().scanAll([&](const MemoryRecord& rec) {
+    agent_store.memory->scanAll([&](const MemoryRecord& rec) {
         if (rec.isAlive()) {
             deleted_ids.push_back(rec.memory_id);
         }
     });
     for (uint64_t id : deleted_ids) {
-        engine_.memoryStore().remove(id);
+        agent_store.memory->remove(id);
     }
-
     for (uint64_t id : deleted_ids) {
-        engine_.graphStore().removeNode(id);
+        agent_store.graph->removeNode(id);
     }
 
     json resp;
@@ -677,7 +688,7 @@ std::string RestServer::handleIntercept(const std::string& body) {
                 messages.emplace_back(m.value("role", ""), m.value("content", ""));
             }
         }
-        auto result = engine_.capturePipeline().interceptCapture(messages, agent_id, user_id);
+        auto result = engine_.capturePipelineFor(agent_id).interceptCapture(messages, agent_id, user_id);
         json resp;
         resp["capture_scheduled"] = true;
         if (result.ok()) resp["captured_ids"] = *result;
@@ -842,11 +853,11 @@ std::string RestServer::handleListMemories(const std::string& path) {
     if (!page_str.empty()) filter.page = std::stoi(page_str);
     if (!pp_str.empty()) filter.per_page = std::stoi(pp_str);
     
-    // Adapt old filters to new fields if present, but prioritize new ones
-    // agent_id filtering is handled at the AgentStore level (physical isolation),
-    // not in ListFilter. The correct AgentStore is already selected by the caller.
-    // We still parse agent_id from the query param for routing purposes.
-    // auto agent_id_param = extractQueryParam(path, "agent_id");
+    // Route to the correct agent's store for physical isolation.
+    auto agent_id_param = extractQueryParam(path, "agent_id");
+    if (agent_id_param.empty()) agent_id_param = "default";
+    auto& agent_store = engine_.getAgentStore(agent_id_param);
+
     if (auto v = extractQueryParam(path, "user_id"); !v.empty()) {
         filter.user_id_filter = v;
     }
@@ -867,7 +878,7 @@ std::string RestServer::handleListMemories(const std::string& path) {
         filter.layer_filter = v;  // "Raw" | "Derived"
     }
 
-    auto result = engine_.memoryStore().listMemories(filter);
+    auto result = agent_store.memory->listMemories(filter);
 
     json resp;
     resp["total"] = result.total;
@@ -909,13 +920,18 @@ std::string RestServer::handleListEdges(const std::string& path) {
     if (!page_str.empty()) page = std::stoi(page_str);
     if (!pp_str.empty()) per_page = std::stoi(pp_str);
 
+    // Route to per-agent store
+    auto agent_id = extractQueryParam(path, "agent_id");
+    if (agent_id.empty()) agent_id = "default";
+    auto& agent_store = engine_.getAgentStore(agent_id);
+
     // Fetch all edges, filter out those referencing dead memories, then paginate
-    auto all = engine_.graphStore().listEdges(1, 100000);
+    auto all = agent_store.graph->listEdges(1, 100000);
     std::vector<GraphEdge> live_edges;
     live_edges.reserve(all.edges.size());
     for (const auto& e : all.edges) {
-        auto from_rec = engine_.memoryStore().get(e.from_id);
-        auto to_rec = engine_.memoryStore().get(e.to_id);
+        auto from_rec = agent_store.memory->peek(e.from_id);
+        auto to_rec = agent_store.memory->peek(e.to_id);
         if (from_rec.ok() && from_rec.value().isAlive() &&
             to_rec.ok() && to_rec.value().isAlive()) {
             live_edges.push_back(e);
@@ -945,11 +961,14 @@ std::string RestServer::handleGraphNeighbors(const std::string& id_str,
                                               bool include_incoming) {
     try {
         uint64_t memory_id = std::stoull(id_str);
-        auto edges = engine_.graphStore().getNeighborEdges(memory_id);
+
+        // Find which agent store owns this memory
+        auto* store = engine_.findStoreForMemory(memory_id);
+        if (!store) return errorResponse(404, "memory not found");
+
+        auto edges = store->graph->getNeighborEdges(memory_id);
         if (include_incoming) {
-            // Edges that point INTO this memory live only on the source's
-            // adjacency list (e.g. DerivedFrom written from derived → raw).
-            auto incoming = engine_.graphStore().getIncomingEdges(memory_id);
+            auto incoming = store->graph->getIncomingEdges(memory_id);
             edges.insert(edges.end(), incoming.begin(), incoming.end());
         }
 
@@ -960,11 +979,8 @@ std::string RestServer::handleGraphNeighbors(const std::string& id_str,
             edge["to_id"]   = std::to_string(e.to_id);
             edge["type"]    = edgeTypeToString(e.type);
             edge["weight"]  = e.weight;
-            // Inline the neighbor's current phase + a short content preview so
-            // the WebUI can show "what the other side actually says" without
-            // an N+1 fetch per edge. Looking up the OTHER endpoint of the edge.
             uint64_t other = e.from_id == memory_id ? e.to_id : e.from_id;
-            if (auto rec = engine_.memoryStore().get(other); rec.ok()) {
+            if (auto rec = store->memory->peek(other); rec.ok()) {
                 edge["other_phase"]      = phaseToString(rec->phase);
                 edge["other_confidence"] = confidenceToString(rec->confidence_level);
                 edge["other_preview"]    = truncateUtf8(rec->content, 90);
@@ -1013,25 +1029,30 @@ std::string RestServer::handleCoverageStats(const std::string& agent_id) {
     resp["conflicted"] = stats.conflicted;
     resp["last_updated"] = stats.last_updated;
 
-    // Add scope/type/phase/confidence distribution
-    json scope_dist = json::object(), type_dist = json::object(), phase_dist = json::object(), confidence_dist = json::object();
-    engine_.memoryStore().scanAll([&](const MemoryRecord& rec) {
-        if (!agent_id.empty() && rec.agent_id != agent_id) return;
-        
+    // Add scope/type/phase/confidence/tier distribution — route to agent store
+    json scope_dist = json::object(), type_dist = json::object(),
+         phase_dist = json::object(), confidence_dist = json::object(),
+         tier_dist = json::object();
+    auto effective_agent_id = agent_id.empty() ? std::string("default") : agent_id;
+    auto& agent_store = engine_.getAgentStore(effective_agent_id);
+    agent_store.memory->scanAll([&](const MemoryRecord& rec) {
         std::string sc = scopeToString(rec.scope);
         std::string tp = memoryTypeToString(rec.memory_type);
         std::string ph = phaseToString(rec.phase);
         std::string cf = confidenceToString(rec.confidence_level);
+        std::string tr = memoryTierToString(rec.tier);
         
         scope_dist[sc] = (scope_dist.contains(sc) ? scope_dist[sc].get<int>() : 0) + 1;
         type_dist[tp] = (type_dist.contains(tp) ? type_dist[tp].get<int>() : 0) + 1;
         phase_dist[ph] = (phase_dist.contains(ph) ? phase_dist[ph].get<int>() : 0) + 1;
         confidence_dist[cf] = (confidence_dist.contains(cf) ? confidence_dist[cf].get<int>() : 0) + 1;
+        tier_dist[tr] = (tier_dist.contains(tr) ? tier_dist[tr].get<int>() : 0) + 1;
     });
     resp["scope_distribution"] = scope_dist;
     resp["memory_type_distribution"] = type_dist;
     resp["phase_distribution"] = phase_dist;
     resp["confidence_distribution"] = confidence_dist;
+    resp["tier_distribution"] = tier_dist;
     return jsonResponse(200, resp.dump());
 }
 
@@ -1046,6 +1067,10 @@ std::string RestServer::handleRegisterAgent(const std::string& body) {
         }
         auto result = engine_.registerAgent(agent_id);
         if (!result.ok()) {
+            // Idempotent: if agent already exists, treat as success
+            if (result.error().code == Error::AlreadyExists) {
+                return jsonResponse(200, R"({"status":"already_registered","agent_id":")" + agent_id + "\"}");
+            }
             return errorResponse(500, result.error().toString());
         }
         return jsonResponse(201, R"({"status":"registered","agent_id":")" + agent_id + "\"}");

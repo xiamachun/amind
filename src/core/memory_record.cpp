@@ -177,7 +177,7 @@ Result<MemoryRecord> MemoryRecord::deserialize(std::span<const uint8_t> data) {
         if (header.memory_type > static_cast<uint8_t>(MemoryType::Ephemeral)) {
             return makeError(Error::CorruptedData, "invalid memory_type value");
         }
-        if (header.tier > static_cast<uint8_t>(MemoryTier::Consolidated)) {
+        if (header.tier > static_cast<uint8_t>(MemoryTier::LongTerm)) {
             return makeError(Error::CorruptedData, "invalid tier value");
         }
     }
@@ -240,7 +240,7 @@ Result<MemoryRecord> MemoryRecord::deserialize(std::span<const uint8_t> data) {
         // V1 migration: map old fields to new model
         record.scope = MemoryScope::Private;
         record.memory_type = MemoryType::Ephemeral;
-        record.tier = MemoryTier::Ephemeral;
+        record.tier = MemoryTier::Working;
         record.confidence_level = Confidence::Inferred;
         record.confidence_score = 0.5f;
         record.user_id = "anonymous";

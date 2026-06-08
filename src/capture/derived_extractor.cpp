@@ -62,7 +62,7 @@ std::vector<DerivedResult> DerivedExtractor::processFacts(
             derived.user_id = user_id;
             derived.scope = candidate.scope;
             derived.memory_type = candidate.memory_type;
-            derived.tier = MemoryTier::Consolidated; // Derived facts are consolidated
+            derived.tier = MemoryTier::ShortTerm; // Derived facts start at ShortTerm
             derived.layer = MemoryLayer::Derived;
             derived.source_tier = candidate.source_tier;
             derived.importance = candidate.importance;

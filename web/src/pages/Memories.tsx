@@ -28,14 +28,17 @@ export default function Memories() {
   const agent_id = searchParams.get('agent_id') || ''
   const userId = searchParams.get('user_id') || ''
   const layer = searchParams.get('layer') || ''   // '' | 'Raw' | 'Derived'
+  const memoryType = searchParams.get('memory_type') || ''
+  const tier = searchParams.get('tier') || ''
 
   const loadMemories = useCallback(() => {
     setLoading(true)
-    api.listMemories(page, perPage, owner, phase, q, agent_id, userId, layer)
+    api.listMemories(page, perPage, owner, phase, q, agent_id, userId, layer,
+                     false, memoryType, tier)
       .then(r => { setMemories(r.memories || []); setTotal(r.total) })
       .catch(() => {})
       .finally(() => setLoading(false))
-  }, [page, owner, phase, q, agent_id, userId, layer])
+  }, [page, owner, phase, q, agent_id, userId, layer, memoryType, tier])
 
   useEffect(() => { loadMemories() }, [loadMemories])
 
@@ -172,7 +175,7 @@ export default function Memories() {
         <select value={owner} onChange={e => updateFilter('owner', e.target.value)}
           className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200">
           <option value="">All Scopes</option>
-          {['user','project','agent','session','system'].map(o =>
+          {['private','agent_shared','system'].map(o =>
             <option key={o} value={o}>{o}</option>)}
         </select>
         <select value={phase} onChange={e => updateFilter('phase', e.target.value)}
@@ -180,6 +183,18 @@ export default function Memories() {
           <option value="">All Phases</option>
           {['Active','Versioned','Archived','Tombstone'].map(p =>
             <option key={p} value={p}>{p}</option>)}
+        </select>
+        <select value={memoryType} onChange={e => updateFilter('memory_type', e.target.value)}
+          className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200">
+          <option value="">All Types</option>
+          {['ephemeral','user_profile','feedback','domain_knowledge','reference'].map(t =>
+            <option key={t} value={t}>{t}</option>)}
+        </select>
+        <select value={tier} onChange={e => updateFilter('tier', e.target.value)}
+          className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200">
+          <option value="">All Tiers</option>
+          {['working','short_term','long_term'].map(t =>
+            <option key={t} value={t}>{t}</option>)}
         </select>
         <input type="text" placeholder="Filter by user..."
           defaultValue={userId}
@@ -232,16 +247,18 @@ export default function Memories() {
               <th className="text-left px-4 py-3">Content</th>
               <th className="text-left px-4 py-3 w-40">Agent / User</th>
               <th className="text-left px-4 py-3 w-20">Layer</th>
+              <th className="text-left px-4 py-3 w-24">Tier</th>
               <th className="text-left px-4 py-3 w-24">Phase</th>
               <th className="text-left px-4 py-3 w-20">Score</th>
+              <th className="text-left px-4 py-3 w-14">Hits</th>
               <th className="text-left px-4 py-3 w-36">Created</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+              <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
             ) : memories.length === 0 ? (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500">No memories found</td></tr>
+              <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-500">No memories found</td></tr>
             ) : memories.map(m => {
               return (
               <tr key={m.memory_id}
@@ -278,8 +295,27 @@ export default function Memories() {
                     </span>
                   ) : <span className="text-xs text-gray-600">—</span>}
                 </td>
+                <td className="px-4 py-3">
+                  {m.tier === 'long_term' ? (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-900/40 text-emerald-300"
+                          title="Promoted to long-term storage via repeated access">
+                      Long
+                    </span>
+                  ) : m.tier === 'short_term' ? (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-amber-900/40 text-amber-300"
+                          title="Promoted to short-term via access threshold">
+                      Short
+                    </span>
+                  ) : (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-sky-900/40 text-sky-300"
+                          title="Working memory — recent, not yet promoted">
+                      Working
+                    </span>
+                  )}
+                </td>
                 <td className="px-4 py-3 text-gray-400 text-xs">{m.phase}</td>
                 <td className="px-4 py-3 text-gray-400">{m.importance.toFixed(2)}</td>
+                <td className="px-4 py-3 text-gray-400 text-xs font-mono">{m.access_count ?? 0}</td>
                 <td className="px-4 py-3 text-gray-500 text-xs">{fmtTime(m.created_at)}</td>
               </tr>
               )

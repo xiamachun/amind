@@ -231,8 +231,10 @@ bool WriteGate::isTransientContent(const std::string& content) {
 
     // Structural error signals: HTTP status codes, rate limiting, LLM failures.
     // These appear anywhere in the content regardless of language.
+    // HTTP status codes must follow "HTTP", "status", or "code" to avoid false
+    // positives on normal numeric content like "预算500万".
     static const std::regex error_signal_pattern(
-        R"(\b(429|500|502|503|504)\b|rate.?limit|empty.?response|timed?\s*out|connection.?refused)",
+        R"((?:HTTP|status|code|error)\s*[:= ]?\s*\b(429|500|502|503|504)\b|rate.?limit|empty.?response|timed?\s*out|connection.?refused)",
         std::regex::icase);
     if (std::regex_search(content, error_signal_pattern)) {
         return true;

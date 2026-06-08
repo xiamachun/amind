@@ -60,5 +60,3 @@ bench/
 .clang-format
 .clang-tidy
 
-# ── Tests (kept locally, not shipped in release) ───────────────────────────
-tests/

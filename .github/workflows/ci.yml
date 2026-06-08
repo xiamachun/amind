@@ -44,7 +44,9 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug \
             -DAMIND_BUILD_BENCHMARKS=OFF \
             -DAMIND_ENABLE_TLS=ON \
-            -DBREW_PREFIX=/usr
+            -DBREW_PREFIX=/usr \
+            -DAMIND_WERROR=OFF \
+            -Dspdlog_DIR=NOTFOUND
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Run tests

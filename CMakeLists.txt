@@ -30,13 +30,12 @@ message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
 option(AMIND_ENABLE_TLS "Enable TLS/HTTPS support" OFF)
 
 # ── Compiler warnings ───────────────────────────────────────────────────────
-add_compile_options(
-    -Wall -Wextra -Wpedantic -Werror
-    -Wno-unused-parameter
-    -Wshadow
-    -Wnon-virtual-dtor
-    -Woverloaded-virtual
-)
+option(AMIND_WERROR "Treat warnings as errors" ON)
+set(_amind_warn_flags -Wall -Wextra -Wpedantic -Wno-unused-parameter -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual)
+if(AMIND_WERROR)
+    list(APPEND _amind_warn_flags -Werror)
+endif()
+add_compile_options(${_amind_warn_flags})
 
 # ── Sanitizers (Debug builds only) ──────────────────────────────────────────
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

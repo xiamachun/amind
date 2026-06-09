@@ -6,6 +6,7 @@
 #include "gate/write_gate.h"
 #include "lineage/lineage_index.h"
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <string>
@@ -59,13 +60,19 @@ public:
         const StoreFunc& store_func);
 
     struct Stats {
+        std::atomic<uint64_t> total_processed{0};
+        std::atomic<uint64_t> accepted{0};
+        std::atomic<uint64_t> rejected{0};
+        std::atomic<uint64_t> deferred{0};
+    };
+
+    struct StatsSnapshot {
         uint64_t total_processed{0};
         uint64_t accepted{0};
         uint64_t rejected{0};
         uint64_t deferred{0};
     };
-
-    Stats stats() const;
+    StatsSnapshot stats() const;
     void resetStats();
 
 private:

@@ -58,6 +58,16 @@ public:
     /// Force flush the active MemTable to an L0 SSTable and truncate the WAL.
     void flush();
 
+    /// Begin a batch write. Subsequent put/putRaw calls will not fsync the WAL
+    /// individually; a single fsync is performed when endBatch() is called.
+    /// This reduces fsync overhead when writing many records at once (e.g.
+    /// flushing dirty cache entries). Must be paired with endBatch().
+    /// NOT reentrant — caller must not nest beginBatch() calls.
+    void beginBatch();
+
+    /// End a batch write and fsync the WAL once for all accumulated writes.
+    void endBatch();
+
     /// Run L0 → L1 compaction if the threshold is reached.
     void maybeCompact();
 

@@ -153,6 +153,7 @@ Result<MemoryRecord> MemoryStore::get(uint64_t memory_id) {
             it->second.access_count++;
             it->second.last_accessed = MemoryRecord::currentTimeSec();
             tryPromote(it->second);
+            dirty_ids_.insert(memory_id);
             return it->second;
         }
     }
@@ -178,6 +179,7 @@ Result<MemoryRecord> MemoryStore::get(uint64_t memory_id) {
         it->second.last_accessed = MemoryRecord::currentTimeSec();
     }
     tryPromote(it->second);
+    dirty_ids_.insert(memory_id);
     return it->second;
 }
 
@@ -444,6 +446,9 @@ void MemoryStore::applyDecay() {
                          id, memoryTierToString(old_tier), memoryTierToString(record.tier),
                          record.importance);
         }
+
+        // Mark as dirty so changes persist on next flush
+        dirty_ids_.insert(id);
     }
 }
 
@@ -480,7 +485,34 @@ size_t MemoryStore::totalMemories() const {
     return cache_.size();
 }
 
+void MemoryStore::flushDirtyRecords() {
+    // Write back all dirty cache entries to LSM. Must be called under exclusive lock.
+    // Uses WAL batch mode to group all writes into a single fsync, reducing
+    // disk I/O from O(N) fsyncs to O(1) for N dirty records.
+    if (dirty_ids_.empty()) return;
+
+    lsm_->beginBatch();
+    size_t flushed = 0;
+    for (auto it = dirty_ids_.begin(); it != dirty_ids_.end(); ) {
+        auto cache_it = cache_.find(*it);
+        if (cache_it != cache_.end()) {
+            lsm_->putRaw(*it, cache_it->second.serialize());
+            ++flushed;
+        }
+        it = dirty_ids_.erase(it);
+    }
+    lsm_->endBatch();
+    if (flushed > 0) {
+        spdlog::info("Flushed {} dirty cache entries to LSM (batch fsync)", flushed);
+    }
+}
+
 void MemoryStore::flush() {
+    // Write back dirty cache entries before flushing LSM engines
+    {
+        std::unique_lock lock(mutex_);
+        flushDirtyRecords();
+    }
     if (lsm_) lsm_->flush();
     if (hnsw_) {
         auto hnsw_path = config_.data_dir + "/hnsw/index.bin";
@@ -526,6 +558,9 @@ MemoryStore::ListResult MemoryStore::listMemories(const ListFilter& filter) cons
 
 void MemoryStore::evictIfNeeded() {
     if (cache_.size() <= config_.max_cache_size) return;
+
+    // Write back dirty entries before eviction to avoid data loss
+    flushDirtyRecords();
 
     // Evict 20% of entries with lowest access_count
     size_t evict_count = cache_.size() / 5;

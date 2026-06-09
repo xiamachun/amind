@@ -1,5 +1,8 @@
 #include "hnsw_index.h"
 
+#include "core/crc32.h"
+#include "core/file_utils.h"
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -10,31 +13,6 @@
 #include <spdlog/spdlog.h>
 
 namespace amind {
-
-// CRC32 implementation for data integrity verification
-namespace {
-    uint32_t crc32Table[256];
-    std::once_flag crc32InitFlag;
-
-    void initCRC32Table() {
-        for (uint32_t i = 0; i < 256; i++) {
-            uint32_t crc = i;
-            for (int j = 0; j < 8; j++) {
-                crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
-            }
-            crc32Table[i] = crc;
-        }
-    }
-
-    uint32_t computeCRC32(const uint8_t* data, size_t length) {
-        std::call_once(crc32InitFlag, initCRC32Table);
-        uint32_t crc = 0xFFFFFFFF;
-        for (size_t i = 0; i < length; i++) {
-            crc = (crc >> 8) ^ crc32Table[(crc ^ data[i]) & 0xFF];
-        }
-        return ~crc;
-    }
-}
 
 // File format constants
 constexpr uint32_t HNSW_MAGIC = 0x484E5357;  // "HNSW"
@@ -575,18 +553,14 @@ bool HNSWIndex::save(const std::string& path) const {
         return false;
     }
 
-    // Streaming CRC: accumulate bytes as we write
-    uint32_t crc = 0xFFFFFFFF;
-    auto crcWrite = [&](const void* data, size_t len) {
-        file.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(len));
-        auto* bytes = static_cast<const uint8_t*>(data);
-        for (size_t i = 0; i < len; i++) {
-            crc = (crc >> 8) ^ crc32Table[(crc ^ bytes[i]) & 0xFF];
-        }
-    };
+    // Collect all data for CRC calculation
+    std::vector<uint8_t> data_buf;
 
-    // Ensure CRC table is initialized
-    std::call_once(crc32InitFlag, initCRC32Table);
+    auto appendData = [&](const void* data, size_t len) {
+        size_t offset = data_buf.size();
+        data_buf.resize(offset + len);
+        std::memcpy(data_buf.data() + offset, data, len);
+    };
 
     // Write header
     uint32_t magic = HNSW_MAGIC;
@@ -601,22 +575,17 @@ bool HNSWIndex::save(const std::string& path) const {
     uint32_t efSearch = static_cast<uint32_t>(config_.efSearch);
     uint8_t metric = static_cast<uint8_t>(config_.metric);
 
-    crcWrite(&magic, sizeof(magic));
-    crcWrite(&version, sizeof(version));
-    crcWrite(&dimension, sizeof(dimension));
-    crcWrite(&nodeCount, sizeof(nodeCount));
-    crcWrite(&entryPointId, sizeof(entryPointId));
-    crcWrite(&maxLevel, sizeof(maxLevel));
-    crcWrite(&maxConnections, sizeof(maxConnections));
-    crcWrite(&maxConnectionsLayer0, sizeof(maxConnectionsLayer0));
-    crcWrite(&efConstruction, sizeof(efConstruction));
-    crcWrite(&efSearch, sizeof(efSearch));
-    crcWrite(&metric, sizeof(metric));
-
-    if (!file.good()) {
-        spdlog::error("HNSWIndex::save: failed to write header");
-        return false;
-    }
+    appendData(&magic, sizeof(magic));
+    appendData(&version, sizeof(version));
+    appendData(&dimension, sizeof(dimension));
+    appendData(&nodeCount, sizeof(nodeCount));
+    appendData(&entryPointId, sizeof(entryPointId));
+    appendData(&maxLevel, sizeof(maxLevel));
+    appendData(&maxConnections, sizeof(maxConnections));
+    appendData(&maxConnectionsLayer0, sizeof(maxConnectionsLayer0));
+    appendData(&efConstruction, sizeof(efConstruction));
+    appendData(&efSearch, sizeof(efSearch));
+    appendData(&metric, sizeof(metric));
 
     // Write nodes
     for (const auto& [id, node] : nodes_) {
@@ -624,34 +593,42 @@ bool HNSWIndex::save(const std::string& path) const {
         int32_t level = static_cast<int32_t>(node.level);
         uint8_t deleted = node.deleted ? 1 : 0;
 
-        crcWrite(&nodeId, sizeof(nodeId));
-        crcWrite(&level, sizeof(level));
-        crcWrite(&deleted, sizeof(deleted));
+        appendData(&nodeId, sizeof(nodeId));
+        appendData(&level, sizeof(level));
+        appendData(&deleted, sizeof(deleted));
 
         if (node.vector.size() != config_.dimension) {
             spdlog::error("HNSWIndex::save: vector dimension mismatch for node {}", nodeId);
             return false;
         }
-        crcWrite(node.vector.data(), config_.dimension * sizeof(float));
+        appendData(node.vector.data(), config_.dimension * sizeof(float));
 
         for (int l = 0; l <= node.level; ++l) {
             uint32_t connectionCount = static_cast<uint32_t>(node.connections[l].size());
-            crcWrite(&connectionCount, sizeof(connectionCount));
+            appendData(&connectionCount, sizeof(connectionCount));
             for (uint64_t neighborId : node.connections[l]) {
-                crcWrite(&neighborId, sizeof(neighborId));
+                appendData(&neighborId, sizeof(neighborId));
             }
         }
     }
 
+    // Compute CRC over all data
+    uint32_t final_crc = amind::crc32(data_buf.data(), data_buf.size());
+
+    // Write all data and CRC to file
+    file.write(reinterpret_cast<const char*>(data_buf.data()),
+               static_cast<std::streamsize>(data_buf.size()));
+    file.write(reinterpret_cast<const char*>(&final_crc), sizeof(final_crc));
+
     if (!file.good()) {
-        spdlog::error("HNSWIndex::save: failed to write nodes");
+        spdlog::error("HNSWIndex::save: failed to write data");
         return false;
     }
 
-    // Finalize CRC and append (not included in the CRC itself)
-    uint32_t final_crc = ~crc;
-    file.write(reinterpret_cast<const char*>(&final_crc), sizeof(final_crc));
     file.close();
+
+    // fsync before rename to ensure data is on disk
+    amind::fsyncFile(tmp_path);
 
     // Atomic rename: tmp → final path
     std::rename(tmp_path.c_str(), path.c_str());
@@ -801,7 +778,7 @@ bool HNSWIndex::load(const std::string& path) {
         return false;
     }
 
-    uint32_t computedCRC = computeCRC32(fileData.data(), dataSize);
+    uint32_t computedCRC = amind::crc32(fileData.data(), dataSize);
     if (computedCRC != storedCRC) {
         spdlog::error("HNSWIndex::load: CRC32 mismatch (stored: {:#x}, computed: {:#x})", 
                       storedCRC, computedCRC);

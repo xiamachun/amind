@@ -3,12 +3,12 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <iostream>
 
 namespace amind {
 
@@ -49,13 +49,12 @@ void SSTableReader::load() {
                     // Advise sequential access pattern
                     madvise(const_cast<uint8_t*>(mapped_data_), mapped_size_, MADV_SEQUENTIAL);
                     using_mmap_ = true;
-                    std::cout << "SSTableReader: Using mmap for " << file_path_.string() << std::endl;
+                    spdlog::debug("SSTableReader: using mmap for {}", file_path_.string());
                 } else {
                     mapped_data_ = nullptr;
                     close(fd_);
                     fd_ = -1;
-                    std::cout << "SSTableReader: mmap failed, falling back to traditional read for " 
-                              << file_path_.string() << std::endl;
+                    spdlog::debug("SSTableReader: mmap failed, falling back to traditional read for {}", file_path_.string());
                 }
             } else {
                 close(fd_);

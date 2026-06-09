@@ -1,5 +1,7 @@
 #include "cold_tier.h"
 #include "hnsw_index.h"
+#include "core/crc32.h"
+#include "core/file_utils.h"
 
 #include <algorithm>
 #include <fstream>
@@ -77,12 +79,12 @@ bool ColdTierIndex::load() {
 
 bool ColdTierIndex::save() const {
     std::lock_guard lock(mutex_);
-
     if (entries_.empty()) return true;
 
-    std::ofstream file(path_, std::ios::binary);
+    std::string tmp_path = path_ + ".tmp";
+    std::ofstream file(tmp_path, std::ios::binary);
     if (!file.is_open()) {
-        spdlog::error("ColdTier: failed to open {} for writing", path_);
+        spdlog::error("ColdTier: failed to open {} for writing", tmp_path);
         return false;
     }
 
@@ -96,14 +98,27 @@ bool ColdTierIndex::save() const {
     file.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
     file.write(reinterpret_cast<const char*>(&count), sizeof(count));
 
+    // CRC over all entry data for integrity
+    amind::CRC32Builder crcBuilder;
+
     for (const auto& entry : entries_) {
         file.write(reinterpret_cast<const char*>(&entry.id), sizeof(entry.id));
         file.write(reinterpret_cast<const char*>(entry.vector.data()),
                    dimension_ * sizeof(float));
+        crcBuilder.update(&entry.id, sizeof(entry.id));
+        crcBuilder.update(entry.vector.data(), dimension_ * sizeof(float));
     }
 
+    uint32_t final_crc = crcBuilder.finalize();
+    file.write(reinterpret_cast<const char*>(&final_crc), sizeof(final_crc));
     file.close();
-    spdlog::info("ColdTier: saved {} vectors to {}", entries_.size(), path_);
+
+    // fsync before rename ensures data is durable
+    amind::fsyncFile(tmp_path);
+
+    // Atomic rename
+    std::rename(tmp_path.c_str(), path_.c_str());
+    spdlog::info("ColdTier: saved {} vectors to {} (atomic+CRC)", entries_.size(), path_);
     return true;
 }
 

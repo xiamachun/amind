@@ -4,6 +4,8 @@
 #include <fstream>
 #include <spdlog/spdlog.h>
 #include <sstream>
+#include <string>
+#include <vector>
 
 namespace amind {
 
@@ -44,7 +46,29 @@ Result<AppConfig> AppConfig::load(const std::string& path) {
         const char* env_val = std::getenv(env_key.c_str());
         if (env_val) {
             val = env_val;
-            spdlog::info("Config override from env: {}={}", key, val);
+            if (key == "api_token" || key.find("api_key") != std::string::npos) {
+                spdlog::info("Config override from env: {}=****", key);
+            } else {
+                spdlog::info("Config override from env: {}={}", key, val);
+            }
+        }
+    }
+
+    // Support AMIND_* env vars for keys not present in config file
+    static const std::vector<std::string> known_keys = {
+        "max_agents", "agent_auto_create", "max_web_connections",
+        "max_active_sessions", "host", "port", "data_dir", "log_level", "api_token"
+    };
+    for (const auto& key : known_keys) {
+        if (config.values_.count(key)) continue;
+        std::string env_key = "AMIND_";
+        for (char c : key) {
+            env_key += (c == '.' || c == '-') ? '_' : static_cast<char>(toupper(c));
+        }
+        const char* env_val = std::getenv(env_key.c_str());
+        if (env_val) {
+            config.values_[key] = env_val;
+            spdlog::info("Config added from env: {}={}", key, env_val);
         }
     }
 

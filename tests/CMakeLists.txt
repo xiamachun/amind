@@ -286,3 +286,32 @@ target_link_libraries(memory_event_log_test PRIVATE
     GTest::gtest GTest::gtest_main
 )
 add_test(NAME memory_event_log_test COMMAND memory_event_log_test)
+
+# ── Crash Consistency tests ─────────────────────────────────────────────
+add_executable(crash_consistency_test crash_consistency_test.cpp)
+target_include_directories(crash_consistency_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(crash_consistency_test PRIVATE
+    amind_memory
+    amind_vector
+    amind_lsm
+    amind_graph
+    amind_core
+    GTest::gtest GTest::gtest_main
+)
+add_test(NAME crash_consistency_test COMMAND crash_consistency_test)
+
+# ── Audit Fix Verification tests ────────────────────────────────────────
+add_executable(audit_fix_test audit_fix_test.cpp)
+target_include_directories(audit_fix_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(audit_fix_test PRIVATE
+    amind_server
+    amind_session
+    amind_lineage
+    amind_graph
+    amind_vector
+    amind_capture
+    amind_gate
+    amind_core
+    GTest::gtest GTest::gtest_main
+)
+add_test(NAME audit_fix_test COMMAND audit_fix_test)

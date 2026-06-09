@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <string>
+#include <semaphore>
 #include <thread>
 #include <unordered_map>
 
@@ -14,7 +15,7 @@ namespace amind {
 class WebServer {
 public:
     WebServer(const std::string& web_root, int port, int api_port,
-              const std::string& api_token = "");
+              const std::string& api_token = "", int max_connections = 256);
     ~WebServer();
 
     /// Start listening in a background thread (non-blocking).
@@ -48,6 +49,8 @@ private:
     int api_port_;
     std::string api_token_;
     int server_fd_{-1};
+    int max_connections_{256};
+    std::unique_ptr<std::counting_semaphore<>> conn_semaphore_;
     std::atomic<bool> running_{false};
     std::thread thread_;
 };

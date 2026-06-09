@@ -7,6 +7,7 @@ add_library(amind_core
 target_include_directories(amind_core
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
 target_link_libraries(amind_core

@@ -194,6 +194,16 @@ v2_forget_sample_ratio = 0.10
 v2_forget_decay_threshold = 0.3
 v2_forget_archive_threshold = 0.6
 v2_forget_tombstone_threshold = 0.85
+# Forget score signal weights (should sum to ~1.0)
+v2_forget_weight_staleness = 0.25
+v2_forget_weight_low_access = 0.20
+v2_forget_weight_low_importance = 0.20
+v2_forget_weight_conflict_penalty = 0.10
+v2_forget_weight_redundancy = 0.10
+v2_forget_weight_verified_bonus = 0.10
+v2_forget_weight_graph_centrality = 0.05
+# Stale hours: memories not accessed for this many hours get staleness=1.0
+v2_forget_stale_hours = 168
 
 # ── ConflictResolver ──
 v2_conflict_llm_judge = false

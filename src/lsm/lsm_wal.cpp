@@ -68,11 +68,11 @@ void LsmWriteAheadLog::flushAndSync() {
 }
 
 void LsmWriteAheadLog::appendPut(uint64_t seq, uint64_t key, const std::vector<uint8_t>& data) {
-    writeRecord(static_cast<uint8_t>(WalRecordType::PUT), seq, key, data);
+    writeRecord(static_cast<uint8_t>(WalRecordType::Put), seq, key, data);
 }
 
 void LsmWriteAheadLog::appendDelete(uint64_t seq, uint64_t key) {
-    writeRecord(static_cast<uint8_t>(WalRecordType::DELETE), seq, key, {});
+    writeRecord(static_cast<uint8_t>(WalRecordType::Delete), seq, key, {});
 }
 
 void LsmWriteAheadLog::beginBatch() {
@@ -446,8 +446,8 @@ uint64_t LsmWriteAheadLog::replay(const std::filesystem::path& walPath,
                 }
             }
 
-            bool isTombstone = (type == static_cast<uint8_t>(WalRecordType::DELETE));
-            bool isDelete = (type == static_cast<uint8_t>(WalRecordType::DELETE));
+            bool isTombstone = (type == static_cast<uint8_t>(WalRecordType::Delete));
+            bool isDelete = (type == static_cast<uint8_t>(WalRecordType::Delete));
             
             // Sanity check: DELETE should have data_len == 0
             if (isDelete && dataLen > 0) {

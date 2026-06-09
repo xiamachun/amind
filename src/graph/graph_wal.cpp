@@ -1,39 +1,14 @@
 #include "graph_wal.h"
 
+#include "core/crc32.h"
+#include "core/file_utils.h"
+
 #include <cstring>
-#include <fcntl.h>
 #include <filesystem>
 #include <mutex>
-#include <unistd.h>
 #include <spdlog/spdlog.h>
 
 namespace amind {
-
-// CRC32 implementation (thread-safe initialization)
-namespace {
-    uint32_t crc32Table[256];
-    std::once_flag crc32InitFlag;
-
-    void initCRC32() {
-        for (uint32_t i = 0; i < 256; i++) {
-            uint32_t crc = i;
-            for (int j = 0; j < 8; j++) {
-                crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
-            }
-            crc32Table[i] = crc;
-        }
-    }
-}
-
-uint32_t GraphWAL::computeCRC(const void* data, size_t len) {
-    std::call_once(crc32InitFlag, initCRC32);
-    auto* bytes = static_cast<const uint8_t*>(data);
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < len; i++) {
-        crc = (crc >> 8) ^ crc32Table[(crc ^ bytes[i]) & 0xFF];
-    }
-    return ~crc;
-}
 
 GraphWAL::GraphWAL(const std::string& data_dir)
     : wal_path_(data_dir + "/graph_wal.bin"),
@@ -80,13 +55,12 @@ void GraphWAL::appendAdd(uint64_t from, uint64_t to, EdgeType type,
 
     // CRC over all fields except the crc field itself
     size_t payload_size = sizeof(WalRecord) - sizeof(uint32_t);
-    rec.crc32 = computeCRC(&rec, payload_size);
+    rec.crc32 = amind::crc32(&rec, payload_size);
 
     wal_file_.write(reinterpret_cast<const char*>(&rec), sizeof(rec));
     wal_file_.flush();
     // fsync to ensure durability
-    int fd = ::open(wal_path_.c_str(), O_RDONLY);
-    if (fd >= 0) { ::fsync(fd); ::close(fd); }
+    amind::fsyncFile(wal_path_);
 }
 
 void GraphWAL::appendRemove(uint64_t node_id) {
@@ -102,12 +76,11 @@ void GraphWAL::appendRemove(uint64_t node_id) {
     rec.timestamp = 0;
 
     size_t payload_size = sizeof(WalRecord) - sizeof(uint32_t);
-    rec.crc32 = computeCRC(&rec, payload_size);
+    rec.crc32 = amind::crc32(&rec, payload_size);
 
     wal_file_.write(reinterpret_cast<const char*>(&rec), sizeof(rec));
     wal_file_.flush();
-    int fd = ::open(wal_path_.c_str(), O_RDONLY);
-    if (fd >= 0) { ::fsync(fd); ::close(fd); }
+    amind::fsyncFile(wal_path_);
 }
 
 size_t GraphWAL::replay(
@@ -122,7 +95,7 @@ size_t GraphWAL::replay(
     while (file.read(reinterpret_cast<char*>(&rec), sizeof(rec))) {
         // Verify CRC
         size_t payload_size = sizeof(WalRecord) - sizeof(uint32_t);
-        uint32_t expected_crc = computeCRC(&rec, payload_size);
+        uint32_t expected_crc = amind::crc32(&rec, payload_size);
         if (expected_crc != rec.crc32) {
             spdlog::warn("GraphWAL: CRC mismatch at record {}, stopping replay", count);
             break;
@@ -170,12 +143,15 @@ bool GraphWAL::checkpoint(const std::vector<EdgeData>& edges) {
     }
 
     // Compute CRC over edge data
-    header.crc32 = edge_bytes.empty() ? 0 : computeCRC(edge_bytes.data(), edge_bytes.size());
+    header.crc32 = edge_bytes.empty() ? 0 : amind::crc32(edge_bytes.data(), edge_bytes.size());
 
     // Rewrite header with CRC
     snap.seekp(0);
     snap.write(reinterpret_cast<const char*>(&header), sizeof(header));
     snap.close();
+
+    // fsync before atomic rename
+    amind::fsyncFile(tmp_path);
 
     // Atomic rename
     if (fs::exists(snapshot_path_)) {
@@ -220,7 +196,7 @@ std::vector<GraphWAL::EdgeData> GraphWAL::loadSnapshot() {
         }
 
         // Verify CRC
-        uint32_t crc = computeCRC(edges.data(), edges.size() * sizeof(EdgeData));
+        uint32_t crc = amind::crc32(edges.data(), edges.size() * sizeof(EdgeData));
         if (crc != header.crc32) {
             spdlog::warn("GraphWAL: snapshot CRC mismatch, discarding");
             edges.clear();
@@ -237,8 +213,7 @@ void GraphWAL::sync() {
     std::lock_guard lock(mutex_);
     if (wal_file_.is_open()) {
         wal_file_.flush();
-        int fd = ::open(wal_path_.c_str(), O_RDONLY);
-        if (fd >= 0) { ::fsync(fd); ::close(fd); }
+        amind::fsyncFile(wal_path_);
     }
 }
 

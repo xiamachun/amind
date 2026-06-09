@@ -37,6 +37,15 @@ Result<Session> SessionManager::startSession(const std::string& agent_id, const 
         }
     }
 
+    // Enforce maximum active sessions to prevent resource exhaustion
+    size_t active_count = 0;
+    for (const auto& [_, s] : sessions_) {
+        if (s.active) active_count++;
+    }
+    if (active_count >= 1000) {
+        return makeError(Error::InvalidArgument, "maximum active sessions reached (1000)");
+    }
+
     Session session;
     session.session_id = id_gen_.nextId();
     session.agent_id = agent_id;

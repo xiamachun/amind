@@ -420,7 +420,11 @@ std::string RestServer::handleStore(const std::string& body) {
         }
 
         json resp;
-        resp["memory_ids"] = *result;
+        {
+            json ids_arr = json::array();
+            for (auto mid : *result) ids_arr.push_back(std::to_string(mid));
+            resp["memory_ids"] = std::move(ids_arr);
+        }
         resp["async_refinement_scheduled"] = true;
         return jsonResponse(200, resp.dump());
     } catch (const json::exception& e) {
@@ -474,7 +478,7 @@ std::string RestServer::handleRecall(const std::string& body) {
                 if (!match) continue;
             }
             json item;
-            item["memory_id"] = sm.record.memory_id;
+            item["memory_id"] = std::to_string(sm.record.memory_id);
             // Annotate confidential memories so client agents know not to reveal them.
             // Check both: (1) LLM-classified confidential flag in metadata (Stage 2),
             // (2) rule-based hasSecrecyMarker fallback for Raw records or pre-V2 data.
@@ -532,7 +536,7 @@ std::string RestServer::handleGetMemory(const std::string& id_str) {
         if (!result.ok()) return errorResponse(404, "memory not found");
 
         json resp;
-        resp["memory_id"] = result->memory_id;
+        resp["memory_id"] = std::to_string(result->memory_id);
         resp["content"] = result->content;
         resp["agent_id"] = result->agent_id;
         resp["user_id"] = result->user_id;
@@ -542,7 +546,7 @@ std::string RestServer::handleGetMemory(const std::string& id_str) {
         resp["phase"] = phaseToString(result->phase);
         resp["confidence"] = confidenceToString(result->confidence_level);
         resp["version"] = result->mem_version;
-        resp["parent_id"] = result->parent_id;
+        resp["parent_id"] = std::to_string(result->parent_id);
         resp["importance"] = result->importance;
         resp["access_count"] = result->access_count;
         resp["created_at"] = result->created_at;
@@ -569,10 +573,10 @@ std::string RestServer::handleGetHistory(const std::string& id_str) {
         json resp = json::array();
         for (const auto& r : *result) {
             json item;
-            item["memory_id"] = r.memory_id;
+            item["memory_id"] = std::to_string(r.memory_id);
             item["content"] = r.content;
             item["version"] = r.mem_version;
-            item["parent_id"] = r.parent_id;
+            item["parent_id"] = std::to_string(r.parent_id);
             resp.push_back(std::move(item));
         }
         return jsonResponse(200, json{{"versions", resp}}.dump());
@@ -598,22 +602,9 @@ std::string RestServer::handleDeleteMemory(const std::string& id_str) {
 
         // V2: Delegate to RemoveCoordinator when lineage propagation is enabled
         if (engine_.featureGate().isLineagePropagationEnabled()) {
-            auto get_record = [store](uint64_t mid) -> MemoryRecord* {
-                auto result = store->memory->peek(mid);
-                if (!result.ok()) return nullptr;
-                thread_local MemoryRecord tmp;
-                tmp = std::move(result.value());
-                return &tmp;
-            };
-            auto persist = [store](uint64_t mid, const MemoryRecord& rec) {
-                store->memory->remove(mid);
-            };
-            auto hnsw_delete = [](uint64_t /*mid*/) {
-                // Already handled inside memory->remove()
-            };
-
-            auto remove_result = engine_.removeCoordinator().remove(
-                id, RemoveReason::UserDelete, get_record, persist, hnsw_delete);
+            // Use per-agent isolated remove to avoid cross-agent lineage leakage
+            auto remove_result = engine_.removeMemoryIsolated(
+                id, *store, RemoveReason::UserDelete);
 
             if (!remove_result.success) {
                 return errorResponse(404, remove_result.error_message.empty() ? "not found" : remove_result.error_message);
@@ -850,8 +841,12 @@ std::string RestServer::handleListMemories(const std::string& path) {
     MemoryStore::ListFilter filter;
     auto page_str = extractQueryParam(path, "page");
     auto pp_str = extractQueryParam(path, "per_page");
-    if (!page_str.empty()) filter.page = std::stoi(page_str);
-    if (!pp_str.empty()) filter.per_page = std::stoi(pp_str);
+    try {
+        if (!page_str.empty()) filter.page = std::stoi(page_str);
+        if (!pp_str.empty()) filter.per_page = std::stoi(pp_str);
+    } catch (const std::exception&) {
+        return errorResponse(400, "invalid page/per_page parameter");
+    }
     
     // Route to the correct agent's store for physical isolation.
     auto agent_id_param = extractQueryParam(path, "agent_id");
@@ -917,8 +912,12 @@ std::string RestServer::handleListEdges(const std::string& path) {
     int page = 1, per_page = 100;
     auto page_str = extractQueryParam(path, "page");
     auto pp_str = extractQueryParam(path, "per_page");
-    if (!page_str.empty()) page = std::stoi(page_str);
-    if (!pp_str.empty()) per_page = std::stoi(pp_str);
+    try {
+        if (!page_str.empty()) page = std::stoi(page_str);
+        if (!pp_str.empty()) per_page = std::stoi(pp_str);
+    } catch (const std::exception&) {
+        return errorResponse(400, "invalid page/per_page parameter");
+    }
 
     // Route to per-agent store
     auto agent_id = extractQueryParam(path, "agent_id");

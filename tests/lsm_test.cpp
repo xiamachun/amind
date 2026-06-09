@@ -231,3 +231,99 @@ TEST_F(LSMTest, EngineForEachLive) {
     });
     EXPECT_EQ(live_count, 2u);  // 1 and 3 are live
 }
+
+// ── Batch Write Tests ───────────────────────────────────────────────────
+
+TEST_F(LSMTest, BatchWriteDataIntegrity) {
+    LSMEngine engine(test_dir_, 0);
+
+    // Write multiple records in batch mode — single fsync at end
+    engine.beginBatch();
+    for (uint64_t i = 1; i <= 20; ++i) {
+        engine.putRaw(i, makeRecord(i, "batch_" + std::to_string(i)).serialize());
+    }
+    engine.endBatch();
+
+    // All records should be readable
+    for (uint64_t i = 1; i <= 20; ++i) {
+        auto result = engine.get(i);
+        ASSERT_TRUE(result.has_value()) << "Missing key " << i;
+        auto rec = MemoryRecord::deserialize(*result);
+        ASSERT_TRUE(rec.ok());
+        EXPECT_EQ(rec->content, "batch_" + std::to_string(i));
+    }
+}
+
+TEST_F(LSMTest, BatchWriteSurvivesRestart) {
+    {
+        LSMEngine engine(test_dir_, 0);
+        engine.beginBatch();
+        for (uint64_t i = 100; i <= 110; ++i) {
+            engine.putRaw(i, makeRecord(i, "persist_" + std::to_string(i)).serialize());
+        }
+        engine.endBatch();
+        // Don't flush — data only in WAL + MemTable
+    }
+
+    // Reopen — should recover from WAL
+    LSMEngine engine2(test_dir_, 0);
+    for (uint64_t i = 100; i <= 110; ++i) {
+        auto result = engine2.get(i);
+        ASSERT_TRUE(result.has_value()) << "Missing key " << i << " after restart";
+    }
+}
+
+TEST_F(LSMTest, BatchWriteMixedWithNonBatch) {
+    LSMEngine engine(test_dir_, 0);
+
+    // Non-batch write
+    engine.putRaw(1, makeRecord(1, "non_batch").serialize());
+
+    // Batch writes
+    engine.beginBatch();
+    engine.putRaw(2, makeRecord(2, "in_batch_1").serialize());
+    engine.putRaw(3, makeRecord(3, "in_batch_2").serialize());
+    engine.endBatch();
+
+    // Another non-batch write
+    engine.putRaw(4, makeRecord(4, "non_batch_2").serialize());
+
+    // All records should be present
+    for (uint64_t i = 1; i <= 4; ++i) {
+        EXPECT_TRUE(engine.get(i).has_value()) << "Missing key " << i;
+    }
+}
+
+TEST_F(LSMTest, BatchWriteThenFlushAndCompact) {
+    LSMEngine engine(test_dir_, 0);
+
+    engine.beginBatch();
+    for (uint64_t i = 1; i <= 50; ++i) {
+        engine.putRaw(i, makeRecord(i, "compact_" + std::to_string(i)).serialize());
+    }
+    engine.endBatch();
+
+    engine.flush();
+    engine.forceCompact();
+
+    for (uint64_t i = 1; i <= 50; ++i) {
+        auto result = engine.get(i);
+        ASSERT_TRUE(result.has_value()) << "Missing key " << i << " after batch+compact";
+    }
+}
+
+TEST_F(LSMTest, BatchWriteOverwritesSameKey) {
+    LSMEngine engine(test_dir_, 0);
+
+    engine.putRaw(1, makeRecord(1, "original").serialize());
+
+    engine.beginBatch();
+    engine.putRaw(1, makeRecord(1, "overwritten").serialize());
+    engine.endBatch();
+
+    auto result = engine.get(1);
+    ASSERT_TRUE(result.has_value());
+    auto rec = MemoryRecord::deserialize(*result);
+    ASSERT_TRUE(rec.ok());
+    EXPECT_EQ(rec->content, "overwritten");
+}

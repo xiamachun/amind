@@ -15,8 +15,8 @@ constexpr uint32_t WAL_HEADER_SIZE = 32;
 
 // Record type enumeration
 enum class WalRecordType : uint8_t {
-    PUT = 0,
-    DELETE = 1
+    Put = 0,
+    Delete = 1
 };
 
 /// LSM-specific Write-Ahead Log for crash recovery.

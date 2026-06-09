@@ -11,6 +11,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace amind {
@@ -155,6 +156,15 @@ private:
 
     // In-memory index: memory_id → MemoryRecord (hot cache)
     std::unordered_map<uint64_t, MemoryRecord> cache_;
+
+    // Dirty tracking: memory IDs modified in cache but not yet written back to LSM.
+    // Tracks changes from get() (access_count/tier promotion) and applyDecay()
+    // (importance/confidence_level/tier demotion). Flushed to LSM periodically
+    // via flushDirtyRecords() or during shutdown.
+    std::unordered_set<uint64_t> dirty_ids_;
+
+    /// Write back all dirty cache entries to LSM. Called under exclusive lock.
+    void flushDirtyRecords();
 
     void evictIfNeeded();
 

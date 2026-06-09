@@ -103,17 +103,25 @@ std::vector<DerivedResult> DerivedExtractor::processFacts(
     }
 
     spdlog::info("DerivedExtractor: processed {} candidates for raw {}: {} accepted, {} rejected, {} deferred",
-                 candidates.size(), raw_memory_id, stats_.accepted, stats_.rejected, stats_.deferred);
+                 candidates.size(), raw_memory_id, stats_.accepted.load(), stats_.rejected.load(), stats_.deferred.load());
 
     return results;
 }
 
-DerivedExtractor::Stats DerivedExtractor::stats() const {
-    return stats_;
+DerivedExtractor::StatsSnapshot DerivedExtractor::stats() const {
+    StatsSnapshot snap;
+    snap.total_processed = stats_.total_processed.load();
+    snap.accepted = stats_.accepted.load();
+    snap.rejected = stats_.rejected.load();
+    snap.deferred = stats_.deferred.load();
+    return snap;
 }
 
 void DerivedExtractor::resetStats() {
-    stats_ = {};
+    stats_.total_processed.store(0);
+    stats_.accepted.store(0);
+    stats_.rejected.store(0);
+    stats_.deferred.store(0);
 }
 
 }  // namespace amind

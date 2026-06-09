@@ -101,8 +101,6 @@ public:
     size_t walSize() const;
 
 private:
-    static uint32_t computeCRC(const void* data, size_t len);
-
     std::string wal_path_;
     std::string snapshot_path_;
     std::ofstream wal_file_;

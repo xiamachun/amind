@@ -1,5 +1,6 @@
 #include "variable_manager.h"
 #include "config.h"
+#include "core/file_utils.h"
 
 #include <algorithm>
 #include <fstream>
@@ -71,45 +72,46 @@ bool VariableManager::has(const std::string& name) const {
 
 Result<void, Error> VariableManager::set(const std::string& name,
                                           const std::string& value) {
-    std::unique_lock lock(mutex_);
-    auto it = vars_.find(name);
-    if (it == vars_.end()) {
-        return makeError(Error::ConfigError,
-                         "Unknown variable: " + name);
-    }
-    if (it->second.mode == VarMode::READONLY) {
-        return makeError(Error::ConfigError,
-                         "Variable '" + name + "' is READONLY (requires restart to change)");
-    }
-
-    // Type validation
-    if (it->second.type == VarType::INT) {
-        try { std::stoi(value); } catch (...) {
+    std::vector<ChangeCallback> callbacks_to_fire;
+    {
+        std::unique_lock lock(mutex_);
+        auto it = vars_.find(name);
+        if (it == vars_.end()) {
             return makeError(Error::ConfigError,
-                             "Invalid integer value for '" + name + "': " + value);
+                             "Unknown variable: " + name);
         }
-    } else if (it->second.type == VarType::FLOAT) {
-        try { std::stof(value); } catch (...) {
+        if (it->second.mode == VarMode::READONLY) {
             return makeError(Error::ConfigError,
-                             "Invalid float value for '" + name + "': " + value);
+                             "Variable '" + name + "' is READONLY (requires restart to change)");
         }
-    }
 
-    std::string old_value = it->second.value;
-    it->second.value = value;
-
-    // Fire callbacks (outside write-lock scope is safer, but for simplicity
-    // we fire under lock — callbacks should be lightweight)
-    auto cb_it = callbacks_.find(name);
-    if (cb_it != callbacks_.end()) {
-        for (auto& cb : cb_it->second) {
-            try { cb(name, value); } catch (const std::exception& e) {
-                spdlog::error("Variable callback error for '{}': {}", name, e.what());
+        if (it->second.type == VarType::INT) {
+            try { std::stoi(value); } catch (...) {
+                return makeError(Error::ConfigError,
+                                 "Invalid integer value for '" + name + "': " + value);
+            }
+        } else if (it->second.type == VarType::FLOAT) {
+            try { std::stof(value); } catch (...) {
+                return makeError(Error::ConfigError,
+                                 "Invalid float value for '" + name + "': " + value);
             }
         }
-    }
 
-    spdlog::info("SET {} = {} (was {})", name, value, old_value);
+        std::string old_value = it->second.value;
+        it->second.value = value;
+        spdlog::info("SET {} = {} (was {})", name, value, old_value);
+
+        auto cb_it = callbacks_.find(name);
+        if (cb_it != callbacks_.end()) {
+            callbacks_to_fire = cb_it->second;
+        }
+    }
+    // Fire callbacks outside lock to avoid blocking readers
+    for (auto& cb : callbacks_to_fire) {
+        try { cb(name, value); } catch (const std::exception& e) {
+            spdlog::error("Variable callback error for '{}': {}", name, e.what());
+        }
+    }
     return Result<void, Error>();
 }
 
@@ -145,12 +147,17 @@ Result<void, Error> VariableManager::persistToFile(const std::string& config_pat
     in.close();
     lock.unlock();
 
-    std::ofstream of(config_path, std::ios::trunc);
+    std::string tmp_path = config_path + ".tmp";
+    std::ofstream of(tmp_path, std::ios::trunc);
     if (!of.is_open()) {
-        return makeError(Error::IOError, "cannot write config: " + config_path);
+        return makeError(Error::IOError, "cannot write config tmp: " + tmp_path);
     }
     of << out.str();
-    spdlog::info("Config persisted to {}", config_path);
+    of.close();
+    // fsync + atomic rename
+    amind::fsyncFile(tmp_path);
+    std::rename(tmp_path.c_str(), config_path.c_str());
+    spdlog::info("Config persisted to {} (atomic)", config_path);
     return Result<void, Error>();
 }
 

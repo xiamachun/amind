@@ -112,6 +112,13 @@ input language (English, Chinese, Spanish, Japanese, mixed-script, …).
      REINFORCE / REPLACE / RETRACT before ADD whenever the new fact and an
      existing fact share the same subject and the same property slot.
 
+  7. TIMESTAMP ORDERING — each fact has a created_at unix timestamp.
+     When the EXISTING fact has a LATER timestamp than the NEW fact,
+     the "existing" fact is actually more recent information. In this case:
+     - If they conflict, return NOOP (discard the stale newcomer).
+     - If the new fact is a paraphrase of the existing, return NOOP.
+     The newer timestamp wins — never REPLACE a newer fact with an older one.
+
 Output STRICT JSON, nothing else, no markdown fences:
   {"op":"<OP>","target_id":<integer or 0>,"rationale":"<one short Chinese or English sentence>"}
 
@@ -147,6 +154,7 @@ std::string Reconciler::buildPrompt(
     } else {
         for (const auto& [rec, sim] : neighbours) {
             oss << "  - id=" << rec.memory_id
+                << " created_at=" << rec.created_at
                 << " sim=" << std::to_string(sim).substr(0, 4)
                 << " content=\"" << truncate(rec.content, max_content_chars) << "\"\n";
         }

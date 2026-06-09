@@ -1,4 +1,6 @@
 #include "session_wal.h"
+#include "core/crc32.h"
+#include "core/file_utils.h"
 
 #include <filesystem>
 #include <nlohmann/json.hpp>
@@ -74,8 +76,27 @@ std::unordered_map<uint64_t, Session> SessionWAL::replay() {
     size_t count = 0;
     while (std::getline(file, line)) {
         if (line.empty()) continue;
+
+        // Strip CRC suffix (backwards compatible: old lines without CRC still parse)
+        std::string json_part = line;
+        auto tab_pos = line.rfind('\t');
+        if (tab_pos != std::string::npos && tab_pos > 0) {
+            std::string crc_str = line.substr(tab_pos + 1);
+            json_part = line.substr(0, tab_pos);
+            try {
+                uint32_t stored_crc = static_cast<uint32_t>(std::stoul(crc_str));
+                uint32_t computed_crc = amind::crc32(json_part.data(), json_part.size());
+                if (stored_crc != computed_crc) {
+                    spdlog::warn("SessionWAL: CRC mismatch, skipping line");
+                    continue;
+                }
+            } catch (...) {
+                json_part = line;  // legacy format, use full line
+            }
+        }
+
         try {
-            auto j = json::parse(line);
+            auto j = json::parse(json_part);
             auto op = j.value("op", "");
 
             if (op == "start") {
@@ -132,8 +153,10 @@ std::unordered_map<uint64_t, Session> SessionWAL::replay() {
 void SessionWAL::writeLine(const std::string& json_line) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!wal_file_.is_open()) return;
-    wal_file_ << json_line << '\n';
+    uint32_t crc = amind::crc32(json_line.data(), json_line.size());
+    wal_file_ << json_line << "\t" << crc << '\n';
     wal_file_.flush();
+    amind::fsyncFile(wal_path_);
 }
 
 }  // namespace amind

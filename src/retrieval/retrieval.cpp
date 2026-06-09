@@ -69,14 +69,11 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
     std::vector<ScoredMemory> candidates;
     std::unordered_set<uint64_t> candidate_ids;
 
-    // Track whether any Derived-layer memories exist so we can fall back to Raw.
-    bool has_derived = false;
-
     for (const auto& [memory_id, similarity] : semantic_hits) {
         auto record_result = store_.get(memory_id);
         if (!record_result.ok()) continue;
         if (!record_result->isAlive()) continue;
-        
+
         // Filter by agent_id
         if (!agent_id.empty() && record_result->agent_id != agent_id) continue;
 
@@ -84,14 +81,6 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
         if (record_result->scope == MemoryScope::Private) {
             if (!user_id.empty() && record_result->user_id != user_id) continue;
         }
-        // AgentShared memories are visible to all users within the agent_id (already filtered above)
-
-        if (record_result->layer == MemoryLayer::Derived) {
-            has_derived = true;
-        }
-
-        // Prefer derived-layer facts over raw when both exist.
-        if (has_derived && record_result->layer == MemoryLayer::Raw) continue;
 
         ScoredMemory scored;
         scored.record = std::move(*record_result);
@@ -99,11 +88,9 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
         scored.semantic_score = similarity;
         scored.recency_score = computeRecencyScore(scored.record);
 
-        // Keyword score: match query terms against content
         scored.keyword_score = computeKeywordScore(
             scored.record.content, search_query, intent.entities);
 
-        // Graph score: boost by neighbor connectivity within result set
         auto neighbors = graph_.getNeighbors(memory_id);
         size_t connected_in_results = 0;
         for (auto neighbor_id : neighbors) {
@@ -113,11 +100,7 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
             static_cast<float>(connected_in_results) * 0.2f +
             static_cast<float>(neighbors.size()) * 0.05f);
 
-        // Fuse all scores
         if (w.recency_gate_enabled) {
-            // Multiplicative gating: recency acts as a 0-1 multiplier on
-            // the entire score, suppressing very old memories regardless
-            // of semantic match quality.
             float base_score =
                 w.semantic * scored.semantic_score +
                 w.keyword * scored.keyword_score +
@@ -125,7 +108,6 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
                 w.importance * scored.record.importance;
             scored.total_score = base_score * scored.recency_score;
         } else {
-            // Additive mode (default): traditional weighted sum
             scored.total_score =
                 w.semantic * scored.semantic_score +
                 w.keyword * scored.keyword_score +
@@ -138,17 +120,23 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
         candidate_ids.insert(memory_id);
     }
 
-    // If Derived memories appeared mid-iteration, remove any Raw candidates
-    // that were added before we knew Derived existed.
-    if (has_derived) {
+    // Per-fact Derived preference: only exclude Raw memories that have
+    // corresponding Derived children (via parent_id lineage). Raw memories
+    // without Derived coverage remain searchable.
+    std::unordered_set<uint64_t> derived_parents;
+    for (const auto& sm : candidates) {
+        if (sm.record.layer == MemoryLayer::Derived && sm.record.parent_id != 0) {
+            derived_parents.insert(sm.record.parent_id);
+        }
+    }
+    if (!derived_parents.empty()) {
         candidates.erase(
             std::remove_if(candidates.begin(), candidates.end(),
-                           [](const ScoredMemory& sm) {
-                               return sm.record.layer == MemoryLayer::Raw;
+                           [&derived_parents](const ScoredMemory& sm) {
+                               return sm.record.layer == MemoryLayer::Raw
+                                   && derived_parents.count(sm.record.memory_id);
                            }),
             candidates.end());
-    } else if (!candidates.empty()) {
-        spdlog::info("RetrievalPipeline: no Derived memories in namespace, falling back to Raw");
     }
 
     auto ranked = rankAndFuse(candidates, top_k);

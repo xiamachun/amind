@@ -38,9 +38,9 @@ float RecallScorer::computeRecencyScore(uint64_t createdAtMs,
 float RecallScorer::computeFrequencyScore(uint32_t accessCount) {
     // log2(access_count + 1), normalized by dividing by log2(1001) ≈ 10
     // so that access_count=1000 maps to ~1.0
-    constexpr float normalizer = 9.97f;  // log2(1001)
+    constexpr float kFrequencyNormalizer = 9.97f;  // ≈ log2(1001), normalizes to [0,1] for access_count up to 1000
     float rawScore = std::log2(static_cast<float>(accessCount) + 1.0f);
-    return std::clamp(rawScore / normalizer, 0.0f, 1.0f);
+    return std::clamp(rawScore / kFrequencyNormalizer, 0.0f, 1.0f);
 }
 
 // ── Score a single candidate ──────────────────────────────────────────────

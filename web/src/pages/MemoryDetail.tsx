@@ -371,8 +371,8 @@ export default function MemoryDetail() {
                 <div key={d.memory_id}
                      onClick={() => navigate(`/memories/${d.memory_id}`)}
                      className="grid grid-cols-[120px_1fr_60px_60px] items-center gap-3 px-3 py-2 rounded-lg bg-gray-800/50 hover:bg-gray-800 cursor-pointer">
-                  <span className="text-xs font-mono text-blue-300 truncate" title={d.memory_id}>
-                    #{d.memory_id.slice(-12)}
+                  <span className="text-xs font-mono text-blue-300 truncate" title={String(d.memory_id)}>
+                    #{String(d.memory_id).slice(-12)}
                   </span>
                   <span className="text-xs text-gray-200 truncate" title={d.content}>
                     {d.content}
@@ -502,7 +502,7 @@ export default function MemoryDetail() {
                       {e.memory_id !== id && e.memory_id !== '0' && (
                         <Link to={`/memories/${e.memory_id}`}
                               className="text-blue-300 hover:underline font-mono shrink-0">
-                          #{e.memory_id.slice(-8)}
+                          #{String(e.memory_id).slice(-8)}
                         </Link>
                       )}
                       <span className="text-gray-300 flex-1 truncate" title={e.summary}>

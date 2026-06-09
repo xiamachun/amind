@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
@@ -249,6 +250,10 @@ Result<void, Error> Engine::init() {
         }
     }
 
+    // Agent creation policy
+    max_agents_ = static_cast<size_t>(config_.getInt("max_agents", 100));
+    agent_auto_create_ = config_.get("agent_auto_create", "true") == "true";
+
     // LineageIndex is now per-agent, initialized in initAgentStore()
 
     // ForgetEngine
@@ -259,6 +264,15 @@ Result<void, Error> Engine::init() {
     forget_cfg.gc_interval_seconds = static_cast<uint32_t>(config_.getInt("v2_forget_gc_interval", 3600));
     forget_cfg.sample_ratio        = config_.getFloat("v2_forget_sample_ratio", 0.10f);
     forget_cfg.shadow_mode         = v2_cfg.global_shadow_mode;
+    // Forget score signal weights (configurable, must sum to ~1.0)
+    forget_cfg.weight_staleness        = config_.getFloat("v2_forget_weight_staleness", 0.25f);
+    forget_cfg.weight_low_access       = config_.getFloat("v2_forget_weight_low_access", 0.20f);
+    forget_cfg.weight_low_importance   = config_.getFloat("v2_forget_weight_low_importance", 0.20f);
+    forget_cfg.weight_conflict_penalty = config_.getFloat("v2_forget_weight_conflict_penalty", 0.10f);
+    forget_cfg.weight_redundancy       = config_.getFloat("v2_forget_weight_redundancy", 0.10f);
+    forget_cfg.weight_verified_bonus   = config_.getFloat("v2_forget_weight_verified_bonus", 0.10f);
+    forget_cfg.weight_graph_centrality = config_.getFloat("v2_forget_weight_graph_centrality", 0.05f);
+    forget_cfg.stale_hours             = config_.getFloat("v2_forget_stale_hours", 168.0f);
     // Phase 4: ForgetEngine no longer owns its own log; GC decisions go to
     // events_log_ instead. data_dir parameter dropped.
     forget_engine_ = std::make_unique<ForgetEngine>(forget_cfg);
@@ -339,17 +353,31 @@ Result<void, Error> Engine::init() {
 
 void Engine::shutdown() {
     spdlog::info("Shutting down amind engine...");
+
+    // Step 1: Stop accepting new work
     scheduler_running_ = false;
+
+    // Step 2: Cancel inflight async tasks immediately
+    if (task_executor_) task_executor_->shutdown();
+
+    // Step 3: Wait for background threads to finish
     if (forget_thread_.joinable()) forget_thread_.join();
     if (consolidation_thread_.joinable()) consolidation_thread_.join();
-    if (task_executor_) task_executor_->shutdown();
+
+    // Step 4: Flush all dirty data to disk
     {
         std::lock_guard<std::mutex> lk(agent_stores_mutex_);
         for (auto& [id, store] : agent_stores_) {
-            if (store->graph) { store->graph->checkpoint(); store->graph->flush(); }
-            if (store->memory) store->memory->flush();
+            if (store->memory) {
+                store->memory->flush();
+            }
+            if (store->graph) {
+                store->graph->checkpoint();
+                store->graph->flush();
+            }
         }
     }
+
     spdlog::info("amind engine shutdown complete");
 }
 
@@ -388,7 +416,7 @@ Engine::ForgetCycleResult Engine::runForgetCycleOnce() {
             store->memory->scanAll([&](const MemoryRecord& rec) {
                 if (!rec.isAlive()) return;
                 // Sample based on configured ratio
-                if ((rec.memory_id % 100) >= static_cast<uint64_t>(
+                if ((std::hash<uint64_t>{}(rec.memory_id) % 100) >= static_cast<uint64_t>(
                         forget_engine_->config().sample_ratio * 100)) return;
 
                 ForgetSignals sig;
@@ -1007,6 +1035,13 @@ Engine::AgentStore& Engine::getAgentStore(const std::string& agent_id) {
     if (it != agent_stores_.end()) return *it->second;
 
     // Auto-create "default" if missing
+    // Enforce agent creation policy
+    if (agent_id != "default" && !agent_auto_create_) {
+        throw std::runtime_error("Agent auto-creation disabled, unknown agent: " + agent_id);
+    }
+    if (agent_stores_.size() >= max_agents_) {
+        throw std::runtime_error("Maximum agent limit reached (" + std::to_string(max_agents_) + ")");
+    }
     auto store = std::make_unique<AgentStore>();
     store->agent_id = agent_id;
     store->display_name = agent_id;
@@ -1110,6 +1145,24 @@ void Engine::saveAgentsMeta() {
     } else {
         spdlog::warn("Failed to write agents.json to {}", agents_meta_path_);
     }
+}
+
+RemoveResult Engine::removeMemoryIsolated(uint64_t memory_id, AgentStore& store, RemoveReason reason) {
+    auto get_record = [&store](uint64_t mid) -> MemoryRecord* {
+        auto result = store.memory->peek(mid);
+        if (!result.ok()) return nullptr;
+        thread_local MemoryRecord tmp;
+        tmp = std::move(result.value());
+        return &tmp;
+    };
+    auto persist = [&store](uint64_t mid, const MemoryRecord& /*rec*/) {
+        store.memory->remove(mid);
+    };
+    auto hnsw_delete = [](uint64_t /*mid*/) {};
+
+    // Use per-agent LineageIndex for correct isolation
+    RemoveCoordinator agent_coordinator(*store.lineage, *forget_engine_);
+    return agent_coordinator.remove(memory_id, reason, get_record, persist, hnsw_delete);
 }
 
 }  // namespace amind

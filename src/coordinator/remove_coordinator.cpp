@@ -27,7 +27,6 @@ RemoveResult RemoveCoordinator::remove(uint64_t memory_id,
     }
 
     // Step 2: Mark primary as Tombstone
-    MemoryPhase before_state = primary->phase;
     primary->markTombstone();
     persist(memory_id, *primary);
 
@@ -48,11 +47,6 @@ RemoveResult RemoveCoordinator::remove(uint64_t memory_id,
                 descendant->markInvalidated();
                 persist(invalidated_id, *descendant);
                 hnsw_delete(invalidated_id);
-
-                // TODO Phase 4 follow-up: emit MemoryEvent{kind=LineagePropagate}
-                // via an events_log_ injection here. For now the cascade still
-                // works correctly; only its observability event is missing.
-                (void)memory_id;
             }
         });
 
@@ -65,12 +59,7 @@ RemoveResult RemoveCoordinator::remove(uint64_t memory_id,
         }
     }
 
-    // Step 6: Log the primary remove — TODO Phase 4 follow-up: emit
-    // MemoryEvent{kind=GcTombstone} via events_log_ injection here.
-    (void)before_state;
-    (void)reason;
-
-    // Step 7: Update stats
+    // Step 6: Update stats
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stats_.total_removes++;

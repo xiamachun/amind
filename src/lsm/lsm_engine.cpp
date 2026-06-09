@@ -225,6 +225,14 @@ void LSMEngine::putRaw(uint64_t memory_id, std::vector<uint8_t> data) {
     }
 }
 
+void LSMEngine::beginBatch() {
+    if (wal_) wal_->beginBatch();
+}
+
+void LSMEngine::endBatch() {
+    if (wal_) wal_->endBatch();
+}
+
 void LSMEngine::flushAndCompact() {
     // Move active memtable to immutable.
     immutable_memtable_ = std::move(active_memtable_);

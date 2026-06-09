@@ -119,6 +119,8 @@ public:
     ForgetEngine& forgetEngine() { return *forget_engine_; }
     ConflictResolver& conflictResolver() { return *conflict_resolver_; }
     RemoveCoordinator& removeCoordinator() { return *remove_coordinator_; }
+    /// Execute remove with per-agent lineage isolation (avoids cross-agent leakage).
+    RemoveResult removeMemoryIsolated(uint64_t memory_id, AgentStore& store, RemoveReason reason);
     ConsolidationWorker& consolidationWorker() { return *consolidation_worker_; }
     DerivedExtractor& derivedExtractor() { return *derived_extractor_; }
     Reconciler* reconciler() { return reconciler_.get(); }   // optional, may be null
@@ -195,6 +197,8 @@ private:
     std::unordered_map<std::string, std::unique_ptr<AgentStore>> agent_stores_;
     mutable std::mutex agent_stores_mutex_;
     std::string agents_meta_path_;  // path to agents.json
+    size_t max_agents_{100};
+    bool agent_auto_create_{true};
 
     Result<void, Error> initAgentStore(AgentStore& store);
     void initAgentPipelines(AgentStore& store, const RetrievalWeights& weights);

@@ -88,7 +88,8 @@ int main(int argc, char* argv[]) {
         auto webui_port = engine.config().getInt("webui_port", 11011);
         auto webui_root = engine.config().get("webui_root", "web/dist");
         auto api_token = engine.config().get("api_token", "");
-        web_server = std::make_unique<amind::WebServer>(webui_root, webui_port, port, api_token);
+        auto max_web_conn = engine.config().getInt("max_web_connections", 256);
+        web_server = std::make_unique<amind::WebServer>(webui_root, webui_port, port, api_token, max_web_conn);
         web_server->startAsync();
     }
 
@@ -104,6 +105,8 @@ int main(int argc, char* argv[]) {
         spdlog::error("Server failed: {}", server_result.error().toString());
     }
 
+    // Graceful shutdown: stop WebUI first, then engine
+    if (web_server) web_server->stop();
     engine.shutdown();
     spdlog::info("amind shutdown complete");
     return 0;

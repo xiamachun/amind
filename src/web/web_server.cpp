@@ -14,8 +14,10 @@ namespace amind {
 namespace fs = std::filesystem;
 
 WebServer::WebServer(const std::string& web_root, int port, int api_port,
-                     const std::string& api_token)
-    : web_root_(web_root), port_(port), api_port_(api_port), api_token_(api_token) {}
+                     const std::string& api_token, int max_connections)
+    : web_root_(web_root), port_(port), api_port_(api_port), api_token_(api_token),
+      max_connections_(max_connections),
+      conn_semaphore_(std::make_unique<std::counting_semaphore<>>(max_connections)) {}
 
 WebServer::~WebServer() {
     stop();
@@ -76,7 +78,18 @@ void WebServer::run() {
             if (!running_) break;
             continue;
         }
-        std::thread([this, client_fd]() { handleClient(client_fd); }).detach();
+        // Enforce max concurrent connections via semaphore
+        if (!conn_semaphore_->try_acquire_for(std::chrono::seconds(5))) {
+            spdlog::warn("WebServer: max connections reached ({}), rejecting", max_connections_);
+            const char* busy = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            send(client_fd, busy, strlen(busy), 0);
+            close(client_fd);
+            continue;
+        }
+        std::thread([this, client_fd]() {
+            handleClient(client_fd);
+            conn_semaphore_->release();
+        }).detach();
     }
 }
 
@@ -128,20 +141,43 @@ void WebServer::handleClient(int client_fd) {
     close(client_fd);
 }
 
+static std::string urlDecode(const std::string& encoded) {
+    std::string decoded;
+    decoded.reserve(encoded.size());
+    for (size_t i = 0; i < encoded.size(); ++i) {
+        if (encoded[i] == '%' && i + 2 < encoded.size()) {
+            auto hexVal = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            int high = hexVal(encoded[i + 1]);
+            int low = hexVal(encoded[i + 2]);
+            if (high >= 0 && low >= 0) {
+                decoded += static_cast<char>(high * 16 + low);
+                i += 2;
+                continue;
+            }
+        }
+        decoded += encoded[i];
+    }
+    return decoded;
+}
+
 std::string WebServer::serveFile(const std::string& url_path) {
-    std::string file_path = url_path;
+    std::string decoded_path = urlDecode(url_path);
+    if (decoded_path == "/") decoded_path = "/index.html";
 
-    // Default to index.html for root
-    if (file_path == "/") file_path = "/index.html";
-
-    // Security: prevent directory traversal
-    if (file_path.find("..") != std::string::npos) {
+    // Security: canonical path must stay within web_root
+    fs::path web_root_abs = fs::weakly_canonical(fs::path(web_root_));
+    fs::path full_path = fs::weakly_canonical(web_root_abs / decoded_path.substr(1));
+    auto root_str = web_root_abs.string();
+    auto full_str = full_path.string();
+    if (full_str.compare(0, root_str.size(), root_str) != 0) {
         return httpResponse(403, "text/plain", "Forbidden");
     }
 
-    fs::path full_path = fs::path(web_root_) / file_path.substr(1);
-
-    // If file exists, serve it
     if (fs::exists(full_path) && fs::is_regular_file(full_path)) {
         std::ifstream ifs(full_path, std::ios::binary);
         if (!ifs) return httpResponse(500, "text/plain", "Internal Server Error");
@@ -150,8 +186,7 @@ std::string WebServer::serveFile(const std::string& url_path) {
         return httpResponse(200, mimeType(full_path.string()), content);
     }
 
-    // SPA fallback: non-file paths return index.html
-    fs::path index_path = fs::path(web_root_) / "index.html";
+    fs::path index_path = web_root_abs / "index.html";
     if (fs::exists(index_path)) {
         std::ifstream ifs(index_path, std::ios::binary);
         if (ifs) {
@@ -160,7 +195,6 @@ std::string WebServer::serveFile(const std::string& url_path) {
             return httpResponse(200, "text/html; charset=utf-8", content);
         }
     }
-
     return httpResponse(404, "text/plain", "Not Found");
 }
 

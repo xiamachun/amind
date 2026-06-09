@@ -172,3 +172,59 @@ TEST_F(ForgetEngineTest, DecisionToStringCoversAll) {
     EXPECT_EQ(decisionToString(ForgetLogEntry::Decision::GateReject), "GateReject");
     EXPECT_EQ(decisionToString(ForgetLogEntry::Decision::GateDefer), "GateDefer");
 }
+
+// ── Custom Weight Configuration ─────────────────────────────────────────
+
+TEST_F(ForgetEngineTest, CustomWeightsAffectScore) {
+    // Create engine with staleness weight = 0.80 (much higher than default 0.25)
+    ForgetConfig custom_cfg;
+    custom_cfg.weight_staleness = 0.80f;
+    custom_cfg.weight_low_access = 0.05f;
+    custom_cfg.weight_low_importance = 0.05f;
+    custom_cfg.weight_conflict_penalty = 0.05f;
+    custom_cfg.weight_redundancy = 0.05f;
+    custom_cfg.weight_verified_bonus = 0.0f;
+    custom_cfg.weight_graph_centrality = 0.0f;
+    ForgetEngine custom_engine(custom_cfg);
+
+    ForgetSignals signals;
+    signals.staleness = 1.0f;
+
+    float default_score = engine_.computeForgetScore(signals);
+    float custom_score = custom_engine.computeForgetScore(signals);
+
+    // Custom engine should give much higher score for staleness
+    EXPECT_NEAR(default_score, 0.25f, 0.01f);  // default weight = 0.25
+    EXPECT_NEAR(custom_score, 0.80f, 0.01f);    // custom weight = 0.80
+}
+
+TEST_F(ForgetEngineTest, CustomThresholdsChangeDecisions) {
+    // Lower thresholds → more aggressive GC
+    ForgetConfig aggressive_cfg;
+    aggressive_cfg.decay_threshold = 0.10f;
+    aggressive_cfg.archive_threshold = 0.20f;
+    aggressive_cfg.tombstone_threshold = 0.30f;
+    ForgetEngine aggressive_engine(aggressive_cfg);
+
+    ForgetSignals signals;
+    signals.staleness = 1.0f;  // score ~0.25 with default weights
+
+    // Default engine: score ~0.25 < decay_threshold(0.3) → below thresholds
+    auto default_eval = engine_.evaluate(42, signals);
+    EXPECT_TRUE(default_eval.reason.find("below all thresholds") != std::string::npos);
+
+    // Aggressive engine: score ~0.25 > decay(0.10) and > archive(0.20) → Archive
+    auto aggressive_eval = aggressive_engine.evaluate(42, signals);
+    EXPECT_EQ(aggressive_eval.recommended_action, ForgetLogEntry::Decision::Archive);
+}
+
+TEST_F(ForgetEngineTest, ConfigSnapshotReflectsCustomValues) {
+    ForgetConfig custom_cfg;
+    custom_cfg.stale_hours = 336.0f;  // 14 days
+    custom_cfg.weight_staleness = 0.50f;
+    ForgetEngine custom_engine(custom_cfg);
+
+    auto snapshot = custom_engine.config();
+    EXPECT_FLOAT_EQ(snapshot.stale_hours, 336.0f);
+    EXPECT_FLOAT_EQ(snapshot.weight_staleness, 0.50f);
+}

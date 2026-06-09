@@ -275,10 +275,11 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                              memory_id, extraction.error().toString());
             }
         }
-        // No extractable facts AND LLM succeeded → Raw has no memory value.
+        // No extractable facts AND LLM succeeded — keep the raw memory
+        // so it remains searchable via recall. Previously this deleted the
+        // raw record, causing data loss when LLM extraction was unreliable.
         if (fact_list.empty() && !pre_extracted && !extract_failed) {
-            store_.remove(memory_id);
-            spdlog::info("Stage2: removed Raw {} (no extractable facts): '{}'",
+            spdlog::info("Stage2: no extractable facts from Raw {} (kept): '{}'",
                          memory_id, record.content.substr(0, 80));
             return;
         }
@@ -607,6 +608,21 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                             case ReconcileOp::REPLACE: {
                                 // Tombstone the older fact + link new.parent_id = old.
                                 auto old_rec = store_.peek(reconcile_decision.target_id);
+
+                                // Timestamp guard: if target is newer than candidate,
+                                // out-of-order Stage 2 processing caused the older fact
+                                // to arrive after the newer one. Drop the candidate instead.
+                                if (old_rec.ok()) {
+                                    auto cand_rec = store_.peek(result.derived_id);
+                                    if (cand_rec.ok() && old_rec->created_at > cand_rec->created_at) {
+                                        store_.remove(result.derived_id);
+                                        spdlog::info("Reconciler REPLACE(reversed): candidate {} (t={}) is older than target {} (t={}), dropping candidate",
+                                                     result.derived_id, cand_rec->created_at,
+                                                     reconcile_decision.target_id, old_rec->created_at);
+                                        break;
+                                    }
+                                }
+
                                 store_.remove(reconcile_decision.target_id);
                                 graph_.addEdge(result.derived_id,
                                                reconcile_decision.target_id,
@@ -638,6 +654,12 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                         eligible.push_back({sid, sim, std::move(*srec)});
                                     }
 
+                                    // Limit concurrent LLM calls
+                                    static constexpr size_t kMaxConcurrentReconcile = 4;
+                                    if (eligible.size() > kMaxConcurrentReconcile) {
+                                        eligible.resize(kMaxConcurrentReconcile);
+                                    }
+
                                     // Fire LLM calls in parallel
                                     std::vector<std::future<ReconcileDecision>> futures;
                                     futures.reserve(eligible.size());
@@ -667,6 +689,21 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                 // Tombstone target AND the just-stored fact
                                 // (the candidate is a negation, not new info).
                                 auto retract_rec = store_.peek(reconcile_decision.target_id);
+
+                                // Timestamp guard: if target is newer, the retraction
+                                // is stale — only remove the candidate.
+                                {
+                                    auto cand_rec = store_.peek(result.derived_id);
+                                    if (retract_rec.ok() && cand_rec.ok()
+                                        && retract_rec->created_at > cand_rec->created_at) {
+                                        store_.remove(result.derived_id);
+                                        spdlog::info("Reconciler RETRACT(reversed): candidate {} (t={}) is older than target {} (t={}), dropping candidate only",
+                                                     result.derived_id, cand_rec->created_at,
+                                                     reconcile_decision.target_id, retract_rec->created_at);
+                                        break;
+                                    }
+                                }
+
                                 store_.remove(reconcile_decision.target_id);
                                 store_.remove(result.derived_id);
                                 spdlog::info("Reconciler RETRACT: removed both {} and just-stored {} — {}",
@@ -689,6 +726,12 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                         if (srec->agent_id != target_agent_id) continue;
                                         if (srec->layer != MemoryLayer::Derived) continue;
                                         eligible.push_back({sid, sim, std::move(*srec)});
+                                    }
+
+                                    // Limit concurrent LLM calls
+                                    static constexpr size_t kMaxConcurrentReconcile = 4;
+                                    if (eligible.size() > kMaxConcurrentReconcile) {
+                                        eligible.resize(kMaxConcurrentReconcile);
                                     }
 
                                     std::vector<std::future<ReconcileDecision>> futures;

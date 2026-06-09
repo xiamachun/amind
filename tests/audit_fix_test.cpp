@@ -98,7 +98,7 @@ TEST_F(AuditFixTest, ColdTierCRCDetectsCorruption) {
         std::fstream file(cold_path, std::ios::in | std::ios::out | std::ios::binary);
         ASSERT_TRUE(file.is_open());
         file.seekp(20);  // skip header, corrupt in entry data
-        char garbage = 0xFF;
+        char garbage = static_cast<char>(0xFF);
         file.write(&garbage, 1);
         file.close();
     }
@@ -278,7 +278,7 @@ TEST_F(AuditFixTest, LineageWalCRCRejectsCorruption) {
         ASSERT_GT(file_size, 30u);
         std::fstream file(wal_path, std::ios::in | std::ios::out | std::ios::binary);
         file.seekp(static_cast<std::streamoff>(file_size) - 10);
-        char garbage = 0xDE;
+        char garbage = static_cast<char>(0xDE);
         file.write(&garbage, 1);
         file.close();
     }
@@ -536,7 +536,7 @@ TEST_F(AuditFixTest, GraphWalCRCRejectsCorruption) {
         ASSERT_GT(file_size, sizeof(WalRecord));
         std::fstream file(wal_path, std::ios::in | std::ios::out | std::ios::binary);
         file.seekp(sizeof(WalRecord) + 5);
-        char garbage = 0xAB;
+        char garbage = static_cast<char>(0xAB);
         file.write(&garbage, 1);
         file.close();
     }
@@ -657,7 +657,7 @@ TEST_F(AuditFixTest, GraphWalSnapshotCRCRejectsCorruption) {
         auto file_size = fs::file_size(snapshot_path);
         std::fstream file(snapshot_path, std::ios::in | std::ios::out | std::ios::binary);
         file.seekp(static_cast<std::streamoff>(file_size) - 5);
-        char garbage = 0xCC;
+        char garbage = static_cast<char>(0xCC);
         file.write(&garbage, 1);
         file.close();
     }
@@ -694,7 +694,7 @@ TEST_F(AuditFixTest, LineageWalSnapshotCRCRejectsCorruption) {
         auto file_size = fs::file_size(snapshot_path);
         std::fstream file(snapshot_path, std::ios::in | std::ios::out | std::ios::binary);
         file.seekp(static_cast<std::streamoff>(file_size) - 3);
-        char garbage = 0xEE;
+        char garbage = static_cast<char>(0xEE);
         file.write(&garbage, 1);
         file.close();
     }

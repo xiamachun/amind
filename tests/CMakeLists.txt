@@ -309,7 +309,9 @@ target_link_libraries(audit_fix_test PRIVATE
     amind_lineage
     amind_graph
     amind_vector
+    amind_retrieval
     amind_capture
+    amind_observability
     amind_gate
     amind_core
     GTest::gtest GTest::gtest_main

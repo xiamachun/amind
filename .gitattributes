@@ -1,0 +1,6 @@
+# Tell GitHub linguist to ignore generated/vendored files
+web/package-lock.json linguist-generated=true
+web/public/logo.png linguist-generated=true
+.github/images/logo.png linguist-generated=true
+*.json linguist-language=JSON
+amind.sh linguist-language=Shell

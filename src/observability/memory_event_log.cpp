@@ -169,7 +169,8 @@ MemoryEventLog::query(const Filter& f) const {
         if (f.trace_id && e.trace_id != *f.trace_id) return false;
         if (f.kind && e.kind != *f.kind) return false;
         if (f.status && e.status != *f.status) return false;
-        if (!f.agent_id_filter.empty() && e.agent_id != f.agent_id_filter) {
+        if (!f.agent_id_filter.empty() &&
+            e.agent_id.substr(0, f.agent_id_filter.size()) != f.agent_id_filter) {
             return false;
         }
         if (f.since_ms && e.timestamp_ms < f.since_ms) return false;

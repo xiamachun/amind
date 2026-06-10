@@ -90,6 +90,16 @@ public:
     std::vector<std::pair<uint64_t, float>> searchSimilar(
         const std::vector<float>& query_embedding, size_t top_k);
 
+    /// Search by vector similarity with pre-filter applied during HNSW traversal.
+    /// The filter predicate receives a memory_id and returns true to include it.
+    std::vector<std::pair<uint64_t, float>> searchSimilar(
+        const std::vector<float>& query_embedding, size_t top_k,
+        const HNSWIndex::FilterFunc& filter);
+
+    /// Read-only scope check: returns true if memory is accessible by user_id.
+    /// Used as HNSW pre-filter to avoid post-search scope mismatches.
+    bool peekScopeMatch(uint64_t memory_id, const std::string& user_id) const;
+
     /// Find potentially conflicting memories (similarity > threshold).
     std::vector<std::pair<uint64_t, float>> findConflicts(
         const std::vector<float>& embedding);
@@ -117,6 +127,7 @@ public:
         std::string query;                 // keyword substring search
         std::string user_id_filter;        // empty = all; matches user_metadata["user_id"]
         std::string layer_filter;          // "Raw" | "Derived" | empty=all
+        std::string tier_filter;           // "working" | "short_term" | "long_term" | empty=all
         bool include_tombstone{false};     // when true, return Tombstoned records too
     };
     struct ListResult {

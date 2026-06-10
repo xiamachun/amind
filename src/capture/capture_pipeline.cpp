@@ -890,7 +890,11 @@ Result<ExtractionResult> CapturePipeline::extractFacts(const std::string& conten
         "(e.g. '用户的手机号是139-9999-8888' NOT '用户的新手机号是...')\n"
         "- Do NOT use words like 新/旧/之前/曾经/原来 — just state what IS true now\n"
         "- When the text expresses a PREFERENCE switch (e.g. 不再喜欢X, 改成Z), "
-        "extract as '用户最喜欢的<类别>是Y'\n\n"
+        "extract as '用户最喜欢的<类别>是Y'\n"
+        "- Faithfully preserve time references that appear in the user's own words "
+        "(e.g. '2024年', 'last year', '去年'). But do NOT add temporal annotations "
+        "that the user did not say — no '(2025年更新)', '(latest)', '(截至目前)' etc. "
+        "Temporal ordering is managed automatically by the system's created_at field.\n\n"
         "Text: " + content;
 
     constexpr int MAX_RETRIES = 3;

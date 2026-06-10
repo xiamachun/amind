@@ -12,13 +12,16 @@ export default function Memories() {
   // Store form state
   const [showForm, setShowForm] = useState(false)
   const [newContent, setNewContent] = useState('')
-  const [newOwner, setNewOwner] = useState('user')
+  const [newOwner, setNewOwner] = useState('private')
+  const [newAgentId, setNewAgentId] = useState('')
+  const [newUserId, setNewUserId] = useState('')
   const [storing, setStoring] = useState(false)
   const [storeMsg, setStoreMsg] = useState('')
 
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [deleting, setDeleting] = useState(false)
   const [confirmAction, setConfirmAction] = useState<'archive' | 'delete' | null>(null)
+  const [agentIds, setAgentIds] = useState<string[]>([])
 
   const page = Number(searchParams.get('page') || '1')
   const perPage = 20
@@ -42,6 +45,17 @@ export default function Memories() {
 
   useEffect(() => { loadMemories() }, [loadMemories])
 
+  const [allUserIds, setAllUserIds] = useState<string[]>([])
+
+  useEffect(() => {
+    api.listAgentIds().then(list => setAgentIds(list.map(a => a.agent_id))).catch(() => {})
+    // Fetch a large batch to collect unique user_ids for suggestions
+    api.listMemories(1, 5000).then(r => {
+      const uids = Array.from(new Set((r.memories || []).map(m => m.user_id).filter(Boolean)))
+      setAllUserIds(uids)
+    }).catch(() => {})
+  }, [])
+
   const totalPages = Math.ceil(total / perPage)
 
   const updateFilter = (key: string, val: string) => {
@@ -53,12 +67,37 @@ export default function Memories() {
 
   const fmtTime = (ts: number) => ts ? new Date(ts * 1000).toLocaleString() : '-'
 
+  // Merge user_ids from preloaded batch + current page for datalist suggestions
+  const userIdSuggestions = Array.from(new Set([
+    ...allUserIds,
+    ...memories.map(m => m.user_id).filter(Boolean),
+  ]))
+
+  // Auto-submit only when the value matches a suggestion (i.e. selected from datalist);
+  // otherwise wait for Enter key to avoid premature filtering while typing.
+  const handleUserIdInput = (val: string) => {
+    if (val === '' || userIdSuggestions.includes(val)) {
+      updateFilter('user_id', val)
+    }
+  }
+
+  const handleAgentIdInput = (val: string) => {
+    if (val === '' || agentIds.includes(val)) {
+      updateFilter('agent_id', val)
+    }
+  }
+
   const handleStore = async () => {
     if (!newContent.trim()) return
     setStoring(true)
     setStoreMsg('')
     try {
-      const res = await api.storeMemory(newContent.trim(), newOwner)
+      const res = await api.storeMemory(
+        newContent.trim(),
+        newOwner,
+        newAgentId || 'default',
+        newUserId || 'anonymous',
+      )
       setStoreMsg(`Stored! IDs: ${(res.memory_ids || []).join(', ')}`)
       setNewContent('')
       setTimeout(() => { setStoreMsg(''); setShowForm(false); loadMemories() }, 1500)
@@ -121,7 +160,7 @@ export default function Memories() {
             rows={4}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200
                        focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-y" />
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <label className="text-xs text-gray-500">Scope:</label>
             <select value={newOwner} onChange={e => setNewOwner(e.target.value)}
               className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200">
@@ -129,6 +168,22 @@ export default function Memories() {
               <option value="agent_shared">Agent Shared</option>
               <option value="system">System</option>
             </select>
+            <label className="text-xs text-gray-500">Agent:</label>
+            <input type="text" placeholder="default"
+              value={newAgentId} onChange={e => setNewAgentId(e.target.value)}
+              list="store-agent-list"
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 w-40" />
+            <datalist id="store-agent-list">
+              {agentIds.map(aid => <option key={aid} value={aid} />)}
+            </datalist>
+            <label className="text-xs text-gray-500">User:</label>
+            <input type="text" placeholder="anonymous"
+              value={newUserId} onChange={e => setNewUserId(e.target.value)}
+              list="store-user-list"
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 w-36" />
+            <datalist id="store-user-list">
+              {userIdSuggestions.map(uid => <option key={uid} value={uid} />)}
+            </datalist>
             <button onClick={handleStore} disabled={storing || !newContent.trim()}
               className="px-4 py-1.5 rounded-lg text-sm bg-indigo-600 text-white hover:bg-indigo-500
                          disabled:opacity-40 disabled:cursor-not-allowed font-medium">
@@ -175,7 +230,7 @@ export default function Memories() {
         <select value={owner} onChange={e => updateFilter('owner', e.target.value)}
           className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200">
           <option value="">All Scopes</option>
-          {['private','agent_shared','system'].map(o =>
+          {['private','agent_shared'].map(o =>
             <option key={o} value={o}>{o}</option>)}
         </select>
         <select value={phase} onChange={e => updateFilter('phase', e.target.value)}
@@ -198,14 +253,24 @@ export default function Memories() {
         </select>
         <input type="text" placeholder="Filter by user..."
           defaultValue={userId}
+          list="user-id-list"
+          onChange={e => handleUserIdInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && updateFilter('user_id', (e.target as HTMLInputElement).value)}
           className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 w-40
                      focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+        <datalist id="user-id-list">
+          {userIdSuggestions.map(uid => <option key={uid} value={uid} />)}
+        </datalist>
         <input type="text" placeholder="agent_id..."
           defaultValue={agent_id}
+          list="agent-id-list"
+          onChange={e => handleAgentIdInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && updateFilter('agent_id', (e.target as HTMLInputElement).value)}
           className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 w-36
                      focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+        <datalist id="agent-id-list">
+          {agentIds.map(aid => <option key={aid} value={aid} />)}
+        </datalist>
         <button onClick={loadMemories} title="Refresh"
           className="bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg px-2.5 py-2 text-gray-300
                      transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500">
@@ -245,8 +310,11 @@ export default function Memories() {
                   className="rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-indigo-500 cursor-pointer" />
               </th>
               <th className="text-left px-4 py-3">Content</th>
-              <th className="text-left px-4 py-3 w-40">Agent / User</th>
+              <th className="text-left px-4 py-3 w-40">Agent</th>
+              <th className="text-left px-4 py-3 w-32">User</th>
               <th className="text-left px-4 py-3 w-20">Layer</th>
+              <th className="text-left px-4 py-3 w-24">Type</th>
+              <th className="text-left px-4 py-3 w-20">Scope</th>
               <th className="text-left px-4 py-3 w-24">Tier</th>
               <th className="text-left px-4 py-3 w-24">Phase</th>
               <th className="text-left px-4 py-3 w-20">Score</th>
@@ -256,9 +324,9 @@ export default function Memories() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+              <tr><td colSpan={12} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
             ) : memories.length === 0 ? (
-              <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-500">No memories found</td></tr>
+              <tr><td colSpan={12} className="px-4 py-8 text-center text-gray-500">No memories found</td></tr>
             ) : memories.map(m => {
               return (
               <tr key={m.memory_id}
@@ -275,8 +343,17 @@ export default function Memories() {
                 </td>
                 <td className="px-4 py-3">
                   {m.agent_id ? (
-                    <span className="text-xs text-indigo-400 truncate block max-w-[160px]" title={`${m.agent_id} / ${m.user_id || '—'}`}>
-                      {m.agent_id}{m.user_id ? ` / ${m.user_id}` : ''}
+                    <span className="text-xs text-indigo-400 truncate block max-w-[160px]" title={m.agent_id}>
+                      {m.agent_id}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-gray-600">—</span>
+                  )}
+                </td>
+                <td className="px-4 py-3">
+                  {m.user_id ? (
+                    <span className="text-xs text-emerald-400 truncate block max-w-[120px]" title={m.user_id}>
+                      {m.user_id}
                     </span>
                   ) : (
                     <span className="text-xs text-gray-600">—</span>
@@ -294,6 +371,20 @@ export default function Memories() {
                       Raw
                     </span>
                   ) : <span className="text-xs text-gray-600">—</span>}
+                </td>
+                <td className="px-4 py-3">
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-300">
+                    {m.memory_type || '—'}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${
+                    m.scope === 'agent_shared'
+                      ? 'bg-cyan-900/40 text-cyan-300'
+                      : 'bg-gray-800 text-gray-400'
+                  }`}>
+                    {m.scope || '—'}
+                  </span>
                 </td>
                 <td className="px-4 py-3">
                   {m.tier === 'long_term' ? (

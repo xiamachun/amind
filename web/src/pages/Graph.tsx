@@ -9,12 +9,26 @@ export default function Graph() {
   const [stats, setStats] = useState({ nodes: 0, edges: 0 })
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<Memory | null>(null)
+  const [agentIds, setAgentIds] = useState<string[]>([])
+  const [filterAgent, setFilterAgent] = useState('')
+  const [filterUser, setFilterUser] = useState('')
+  const [userSuggestions, setUserSuggestions] = useState<string[]>([])
+
+  // Load agent list on mount
+  useEffect(() => {
+    api.listAgentIds().then(list => setAgentIds(list.map(a => a.agent_id))).catch(() => {})
+    // Collect user_id suggestions from a broad memories fetch
+    api.listMemories(1, 5000).then(r => {
+      const uids = Array.from(new Set((r.memories || []).map(m => m.user_id).filter(Boolean)))
+      setUserSuggestions(uids)
+    }).catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (!containerRef.current) return
     setLoading(true)
 
-    api.listEdges(1, 2000).then(async (res) => {
+    api.listEdges(1, 2000, filterAgent, filterUser).then(async (res) => {
       const edges = res.edges || []
       const nodeIds = new Set<string>()
       edges.forEach(e => { nodeIds.add(e.from_id); nodeIds.add(e.to_id) })
@@ -95,14 +109,33 @@ export default function Graph() {
     }).catch(() => setLoading(false))
 
     return () => { networkRef.current?.destroy() }
-  }, [])
+  }, [filterAgent, filterUser])
 
   return (
     <div className="space-y-4 h-full flex flex-col">
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-4 flex-wrap">
         <h2 className="text-lg font-semibold text-gray-200">Knowledge Graph</h2>
         <span className="text-xs text-gray-500">{stats.nodes} nodes, {stats.edges} edges</span>
         {loading && <span className="text-xs text-indigo-400 animate-pulse">Loading graph...</span>}
+
+        <div className="flex items-center gap-2 ml-auto">
+          <select value={filterAgent} onChange={e => setFilterAgent(e.target.value)}
+            className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200
+                       focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <option value="">All Agents</option>
+            {agentIds.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <input type="text" placeholder="Filter by user..."
+            list="graph-user-list"
+            value={filterUser}
+            onChange={e => setFilterUser(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+            className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 w-40
+                       focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+          <datalist id="graph-user-list">
+            {userSuggestions.map(u => <option key={u} value={u} />)}
+          </datalist>
+        </div>
       </div>
 
       <div className="flex-1 min-h-0 flex gap-4">

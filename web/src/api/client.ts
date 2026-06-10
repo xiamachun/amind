@@ -97,8 +97,12 @@ export const api = {
   deleteMemory: (id: string) => fetchApi<{deleted: boolean}>(`/v1/memories/${id}`, { method: 'DELETE' }),
   archiveMemory: (id: string) => fetchApi<{archived: boolean}>(`/v1/memories/${id}/archive`, { method: 'POST' }),
 
-  listEdges: (page = 1, perPage = 500) =>
-    fetchApi<EdgeListResponse>(`/v1/graph/edges?page=${page}&per_page=${perPage}`),
+  listEdges: (page = 1, perPage = 500, agentId = '', userId = '') => {
+    const params = new URLSearchParams({ page: String(page), per_page: String(perPage) })
+    if (agentId) params.set('agent_id', agentId)
+    if (userId) params.set('user_id', userId)
+    return fetchApi<EdgeListResponse>(`/v1/graph/edges?${params.toString()}`)
+  },
   getNeighbors: (id: string) => fetchApi<GraphEdge[]>(`/v1/graph/neighbors/${id}`),
   getNeighborsIncoming: (id: string) =>
     fetchApi<GraphEdge[]>(`/v1/graph/neighbors/${id}?include_incoming=1`),
@@ -106,11 +110,11 @@ export const api = {
   listSessions: () => fetchApi<SessionSummary[]>('/v1/sessions/list'),
   sessionSummary: (id: string) => fetchApi<SessionSummary>(`/v1/sessions/${id}/summary`),
 
-  storeMemory: (content: string, scope = 'private', agent_id = 'default') =>
+  storeMemory: (content: string, scope = 'private', agent_id = 'default', user_id = 'anonymous') =>
     fetchApi<{ memory_ids: string[]; async_refinement_scheduled: boolean }>(
       '/v1/memories', {
         method: 'POST',
-        body: JSON.stringify({ content, scope, agent_id }),
+        body: JSON.stringify({ content, scope, agent_id, user_id }),
       }),
 
   backupExport: (type = 'memories') => fetchApi<string>(`/v1/backup/export?type=${type}`),
@@ -196,6 +200,8 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(body),
       }),
+
+  listAgentIds: () => fetchApi<{agent_id: string}[]>('/v1/agents'),
 }
 
 // ── Unified observability types ────────────────────────────────────────────

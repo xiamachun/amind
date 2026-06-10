@@ -236,6 +236,11 @@ std::vector<uint64_t> SessionManager::extractFacts(const Session& session,
     std::string prompt =
         "Extract factual statements from the following user message that should be remembered.\n"
         "User message: \"" + user_input + "\"\n\n"
+        "Rules:\n"
+        "- Preserve time references that appear in the user's own words "
+        "(e.g. '2024年', 'last year'). But do NOT add temporal annotations "
+        "the user did not say — no '(2025年更新)', '(latest)', '(截至目前)' etc. "
+        "Temporal ordering is managed by the system automatically.\n\n"
         "Respond in JSON format: {\"facts\": [\"fact1\", \"fact2\"]}\n"
         "If no facts worth remembering, respond: {\"facts\": []}\n";
 

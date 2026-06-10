@@ -55,31 +55,44 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
 
     // 2. Embed the query (or rewritten query)
     std::string search_query = intent.rewritten_query.empty() ? query : intent.rewritten_query;
+    spdlog::debug("recall: query='{}' agent_id='{}' user_id='{}' top_k={}", search_query, agent_id, user_id, top_k);
     auto embed_result = embedder_->embed(search_query);
     if (!embed_result.ok()) {
+        spdlog::error("recall: embed failed: {}", embed_result.error().toString());
         return embed_result.error();
     }
 
-    // 3. Semantic search (HNSW) — over-fetch heavily because we'll filter by
-    // agent_id and scope below.
+    // 3. Semantic search (HNSW) with user_id pre-filter.
+    // Private-scope memories are filtered at the HNSW level via searchWithFilter
+    // so that they don't crowd out results for the requesting user.
     size_t over_fetch = top_k * 10;
-    auto semantic_hits = store_.searchSimilar(*embed_result, over_fetch);
+    std::vector<std::pair<uint64_t, float>> semantic_hits;
+    if (!user_id.empty() && user_id != "anonymous") {
+        auto filter = [this, &user_id](uint64_t mid) {
+            return store_.peekScopeMatch(mid, user_id);
+        };
+        semantic_hits = store_.searchSimilar(*embed_result, over_fetch, filter);
+    } else {
+        semantic_hits = store_.searchSimilar(*embed_result, over_fetch);
+    }
+    spdlog::debug("recall: searchSimilar returned {} hits (over_fetch={})", semantic_hits.size(), over_fetch);
 
     // 4. Build scored candidates
     std::vector<ScoredMemory> candidates;
     std::unordered_set<uint64_t> candidate_ids;
+    size_t skip_not_ok = 0, skip_not_alive = 0, skip_agent = 0, skip_scope = 0;
 
     for (const auto& [memory_id, similarity] : semantic_hits) {
         auto record_result = store_.get(memory_id);
-        if (!record_result.ok()) continue;
-        if (!record_result->isAlive()) continue;
+        if (!record_result.ok()) { skip_not_ok++; continue; }
+        if (!record_result->isAlive()) { skip_not_alive++; continue; }
 
         // Filter by agent_id
-        if (!agent_id.empty() && record_result->agent_id != agent_id) continue;
+        if (!agent_id.empty() && record_result->agent_id != agent_id) { skip_agent++; continue; }
 
         // Filter by scope: Private memories must match user_id
         if (record_result->scope == MemoryScope::Private) {
-            if (!user_id.empty() && record_result->user_id != user_id) continue;
+            if (!user_id.empty() && record_result->user_id != user_id) { skip_scope++; continue; }
         }
 
         ScoredMemory scored;
@@ -119,6 +132,8 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
         candidates.push_back(std::move(scored));
         candidate_ids.insert(memory_id);
     }
+    spdlog::debug("recall: candidates={} skip_not_ok={} skip_not_alive={} skip_agent={} skip_scope={}",
+                  candidates.size(), skip_not_ok, skip_not_alive, skip_agent, skip_scope);
 
     // Per-fact Derived preference: only exclude Raw memories that have
     // corresponding Derived children (via parent_id lineage). Raw memories

@@ -98,6 +98,7 @@ Result<void, Error> Engine::init() {
     // ── Multi-level LLM fallback ──
     // If llm_fallback_keys is configured (semicolon-separated API keys),
     // wrap the primary LLM in a FallbackLLMProvider for automatic failover.
+    // Optionally, llm_fallback_models can specify a different model per level.
     auto fallback_keys_str = config_.get("llm_fallback_keys", "");
     if (!fallback_keys_str.empty() && (llm_name == "anthropic" || llm_name == "claude")) {
         std::vector<FallbackLLMProvider::Level> levels;
@@ -119,19 +120,43 @@ Result<void, Error> Engine::init() {
             }
         }
 
+        // Parse per-level fallback models (semicolon-separated, parallel to keys).
+        // If a model entry is empty or missing, the primary llm_model is used.
+        auto fallback_models_str = config_.get("llm_fallback_models", "");
+        std::vector<std::string> fallback_models;
+        if (!fallback_models_str.empty()) {
+            size_t mpos = 0;
+            while (mpos < fallback_models_str.size()) {
+                auto sep = fallback_models_str.find(';', mpos);
+                fallback_models.push_back(fallback_models_str.substr(
+                    mpos, sep == std::string::npos ? std::string::npos : sep - mpos));
+                mpos = (sep == std::string::npos) ? fallback_models_str.size() : sep + 1;
+            }
+        }
+
         // Create one provider per fallback key
         size_t level_num = 2;
+        size_t key_index = 0;
         size_t kpos = 0;
         while (kpos < fallback_keys_str.size()) {
             auto sep = fallback_keys_str.find(';', kpos);
             auto key = fallback_keys_str.substr(kpos, sep == std::string::npos ? std::string::npos : sep - kpos);
             kpos = (sep == std::string::npos) ? fallback_keys_str.size() : sep + 1;
-            if (key.empty()) continue;
+            if (key.empty()) { ++key_index; continue; }
+
+            // Use per-level model if specified, otherwise fall back to primary model
+            auto level_model = llm_model;
+            if (key_index < fallback_models.size() && !fallback_models[key_index].empty()) {
+                level_model = fallback_models[key_index];
+            }
 
             auto fallback_llm = std::make_shared<AnthropicLLM>(
-                llm_model, llm_host, llm_port, key, llm_base_url,
+                level_model, llm_host, llm_port, key, llm_base_url,
                 conn_pool_, extra_headers);
             levels.push_back({fallback_llm, "L" + std::to_string(level_num++)});
+            spdlog::info("Fallback L{}: model={}, key={}...",
+                         level_num - 1, level_model, key.substr(0, 8));
+            ++key_index;
         }
 
         if (levels.size() > 1) {

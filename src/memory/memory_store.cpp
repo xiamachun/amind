@@ -348,6 +348,37 @@ std::vector<std::pair<uint64_t, float>> MemoryStore::searchSimilar(
     return pairs;
 }
 
+std::vector<std::pair<uint64_t, float>> MemoryStore::searchSimilar(
+    const std::vector<float>& query_embedding, size_t top_k,
+    const HNSWIndex::FilterFunc& filter) {
+    // Note: no mutex_ lock here — HNSW has its own internal lock, and the
+    // filter callback may need to inspect cache_ which requires separate locking.
+    auto results = hnsw_->searchWithFilter(query_embedding, top_k, filter);
+    std::vector<std::pair<uint64_t, float>> pairs;
+    pairs.reserve(results.size());
+    for (const auto& r : results) {
+        float similarity = 1.0f - r.distance;
+        pairs.emplace_back(r.id, similarity);
+    }
+    return pairs;
+}
+
+bool MemoryStore::peekScopeMatch(uint64_t memory_id, const std::string& user_id) const {
+    // Read-only check: does this memory's scope allow access by user_id?
+    // Returns true if the memory is Shared or if user_id matches.
+    // Lock-free cache peek (caller ensures thread safety or accepts races).
+    std::shared_lock lock(mutex_);
+    auto it = cache_.find(memory_id);
+    if (it == cache_.end()) {
+        // Not in cache — optimistically include (will be filtered post-search)
+        return true;
+    }
+    const auto& rec = it->second;
+    if (!rec.isAlive()) return false;
+    if (rec.scope != MemoryScope::Private) return true;
+    return user_id.empty() || rec.user_id == user_id;
+}
+
 std::vector<std::pair<uint64_t, float>> MemoryStore::findConflicts(
     const std::vector<float>& embedding) {
     auto candidates = searchSimilar(embedding, 10);
@@ -535,11 +566,9 @@ MemoryStore::ListResult MemoryStore::listMemories(const ListFilter& filter) cons
         if (!filter.memory_type_filter.empty() && memoryTypeToString(rec.memory_type) != filter.memory_type_filter) continue;
         if (!filter.phase_filter.empty() && phaseToString(rec.phase) != filter.phase_filter) continue;
         if (!filter.layer_filter.empty() && layerToString(rec.layer) != filter.layer_filter) continue;
+        if (!filter.tier_filter.empty() && memoryTierToString(rec.tier) != filter.tier_filter) continue;
         if (!filter.query.empty() && rec.content.find(filter.query) == std::string::npos) continue;
-        if (!filter.user_id_filter.empty()) {
-            auto it = rec.user_metadata.find("user_id");
-            if (it == rec.user_metadata.end() || it->second != filter.user_id_filter) continue;
-        }
+        if (!filter.user_id_filter.empty() && rec.user_id != filter.user_id_filter) continue;
         matched.push_back(&rec);
     }
 

@@ -848,16 +848,17 @@ std::string RestServer::handleListMemories(const std::string& path) {
         return errorResponse(400, "invalid page/per_page parameter");
     }
     
-    // Route to the correct agent's store for physical isolation.
+    // Extract filter parameters
     auto agent_id_param = extractQueryParam(path, "agent_id");
-    if (agent_id_param.empty()) agent_id_param = "default";
-    auto& agent_store = engine_.getAgentStore(agent_id_param);
-
-    if (auto v = extractQueryParam(path, "user_id"); !v.empty()) {
-        filter.user_id_filter = v;
+    auto user_id_param = extractQueryParam(path, "user_id");
+    
+    if (!user_id_param.empty()) {
+        filter.user_id_filter = user_id_param;
     }
-    if (auto v = extractQueryParam(path, "scope"); !v.empty()) {
+    if (auto v = extractQueryParam(path, "owner"); !v.empty()) {
         filter.scope_filter = v;
+    } else if (auto v2 = extractQueryParam(path, "scope"); !v2.empty()) {
+        filter.scope_filter = v2;
     }
     if (auto v = extractQueryParam(path, "memory_type"); !v.empty()) {
         filter.memory_type_filter = v;
@@ -872,39 +873,122 @@ std::string RestServer::handleListMemories(const std::string& path) {
     if (auto v = extractQueryParam(path, "layer"); !v.empty()) {
         filter.layer_filter = v;  // "Raw" | "Derived"
     }
-
-    auto result = agent_store.memory->listMemories(filter);
+    if (auto v = extractQueryParam(path, "tier"); !v.empty()) {
+        filter.tier_filter = v;  // "working" | "short_term" | "long_term"
+    }
 
     json resp;
-    resp["total"] = result.total;
-    resp["page"] = result.page;
-    resp["per_page"] = result.per_page;
     resp["memories"] = json::array();
-    for (const auto& rec : result.records) {
-        json m;
-        m["memory_id"] = std::to_string(rec.memory_id);
-        m["content"] = rec.content;
-        m["agent_id"] = rec.agent_id;
-        m["user_id"] = rec.user_id;
-        m["scope"] = scopeToString(rec.scope);
-        m["memory_type"] = memoryTypeToString(rec.memory_type);
-        m["tier"] = memoryTierToString(rec.tier);
-        m["phase"] = phaseToString(rec.phase);
-        m["confidence"] = confidenceToString(rec.confidence_level);
-        m["importance"] = rec.importance;
-        m["created_at"] = rec.created_at;
-        m["last_accessed"] = rec.last_accessed;
-        m["access_count"] = rec.access_count;
-        m["version"] = rec.mem_version;
-        m["has_embedding"] = (rec.flags & RecordFlags::HAS_EMBEDDING) != 0;
-        m["layer"] = layerToString(rec.layer);
-        if (!rec.user_metadata.empty()) {
-            json meta = json::object();
-            for (const auto& [k, v] : rec.user_metadata) meta[k] = v;
-            m["metadata"] = std::move(meta);
+
+    if (agent_id_param.empty()) {
+        // Aggregate mode: collect memories from all agents
+        auto all_agent_ids = engine_.listAgents();
+        std::vector<MemoryRecord> all_records;
+        
+        // Save original pagination params before overriding for bulk fetch
+        int requested_page = filter.page;
+        int requested_per_page = filter.per_page;
+        
+        // Override to fetch up to 5000 from each agent
+        filter.page = 1;
+        filter.per_page = 5000;
+        
+        for (const auto& aid : all_agent_ids) {
+            auto& agent_store = engine_.getAgentStore(aid);
+            auto result = agent_store.memory->listMemories(filter);
+            all_records.insert(all_records.end(), 
+                              std::make_move_iterator(result.records.begin()),
+                              std::make_move_iterator(result.records.end()));
         }
-        resp["memories"].push_back(m);
+        
+        // Sort by created_at descending
+        std::sort(all_records.begin(), all_records.end(),
+                  [](const MemoryRecord& a, const MemoryRecord& b) {
+                      return a.created_at > b.created_at;
+                  });
+        
+        // Cap total to 5000
+        size_t total_capped = std::min(all_records.size(), static_cast<size_t>(5000));
+        if (all_records.size() > total_capped) {
+            all_records.resize(total_capped);
+        }
+        
+        // Manual pagination using the original requested page/per_page
+        size_t start_idx = static_cast<size_t>((requested_page - 1) * requested_per_page);
+        size_t end_idx = std::min(start_idx + static_cast<size_t>(requested_per_page), all_records.size());
+        
+        resp["total"] = total_capped;
+        resp["page"] = requested_page;
+        resp["per_page"] = requested_per_page;
+        
+        for (size_t i = start_idx; i < end_idx; ++i) {
+            const auto& rec = all_records[i];
+            json m;
+            m["memory_id"] = std::to_string(rec.memory_id);
+            m["content"] = rec.content;
+            m["agent_id"] = rec.agent_id;
+            m["user_id"] = rec.user_id;
+            m["scope"] = scopeToString(rec.scope);
+            m["memory_type"] = memoryTypeToString(rec.memory_type);
+            m["tier"] = memoryTierToString(rec.tier);
+            m["phase"] = phaseToString(rec.phase);
+            m["confidence"] = confidenceToString(rec.confidence_level);
+            m["importance"] = rec.importance;
+            m["created_at"] = rec.created_at;
+            m["last_accessed"] = rec.last_accessed;
+            m["access_count"] = rec.access_count;
+            m["version"] = rec.mem_version;
+            m["has_embedding"] = (rec.flags & RecordFlags::HAS_EMBEDDING) != 0;
+            m["layer"] = layerToString(rec.layer);
+            if (!rec.user_metadata.empty()) {
+                json meta = json::object();
+                for (const auto& [k, v] : rec.user_metadata) meta[k] = v;
+                m["metadata"] = std::move(meta);
+            }
+            resp["memories"].push_back(m);
+        }
+    } else {
+        // Single agent mode
+        auto& agent_store = engine_.getAgentStore(agent_id_param);
+        
+        // If user_id_filter is set, allow higher per_page limit
+        if (!user_id_param.empty() && filter.per_page > 10000) {
+            filter.per_page = 10000;
+        }
+        
+        auto result = agent_store.memory->listMemories(filter);
+
+        resp["total"] = result.total;
+        resp["page"] = result.page;
+        resp["per_page"] = result.per_page;
+        
+        for (const auto& rec : result.records) {
+            json m;
+            m["memory_id"] = std::to_string(rec.memory_id);
+            m["content"] = rec.content;
+            m["agent_id"] = rec.agent_id;
+            m["user_id"] = rec.user_id;
+            m["scope"] = scopeToString(rec.scope);
+            m["memory_type"] = memoryTypeToString(rec.memory_type);
+            m["tier"] = memoryTierToString(rec.tier);
+            m["phase"] = phaseToString(rec.phase);
+            m["confidence"] = confidenceToString(rec.confidence_level);
+            m["importance"] = rec.importance;
+            m["created_at"] = rec.created_at;
+            m["last_accessed"] = rec.last_accessed;
+            m["access_count"] = rec.access_count;
+            m["version"] = rec.mem_version;
+            m["has_embedding"] = (rec.flags & RecordFlags::HAS_EMBEDDING) != 0;
+            m["layer"] = layerToString(rec.layer);
+            if (!rec.user_metadata.empty()) {
+                json meta = json::object();
+                for (const auto& [k, v] : rec.user_metadata) meta[k] = v;
+                m["metadata"] = std::move(meta);
+            }
+            resp["memories"].push_back(m);
+        }
     }
+    
     return jsonResponse(200, resp.dump());
 }
 
@@ -919,22 +1003,64 @@ std::string RestServer::handleListEdges(const std::string& path) {
         return errorResponse(400, "invalid page/per_page parameter");
     }
 
-    // Route to per-agent store
-    auto agent_id = extractQueryParam(path, "agent_id");
-    if (agent_id.empty()) agent_id = "default";
-    auto& agent_store = engine_.getAgentStore(agent_id);
+    // Route to per-agent store or aggregate all agents
+    auto agent_id_param = extractQueryParam(path, "agent_id");
 
-    // Fetch all edges, filter out those referencing dead memories, then paginate
-    auto all = agent_store.graph->listEdges(1, 100000);
     std::vector<GraphEdge> live_edges;
-    live_edges.reserve(all.edges.size());
-    for (const auto& e : all.edges) {
-        auto from_rec = agent_store.memory->peek(e.from_id);
-        auto to_rec = agent_store.memory->peek(e.to_id);
-        if (from_rec.ok() && from_rec.value().isAlive() &&
-            to_rec.ok() && to_rec.value().isAlive()) {
-            live_edges.push_back(e);
+
+    auto collectEdges = [&](Engine::AgentStore& store) {
+        auto all = store.graph->listEdges(1, 100000);
+        for (const auto& e : all.edges) {
+            auto from_rec = store.memory->peek(e.from_id);
+            auto to_rec = store.memory->peek(e.to_id);
+            if (from_rec.ok() && from_rec.value().isAlive() &&
+                to_rec.ok() && to_rec.value().isAlive()) {
+                live_edges.push_back(e);
+            }
         }
+    };
+
+    if (agent_id_param.empty()) {
+        // Aggregate edges from all agents
+        for (const auto& aid : engine_.listAgents()) {
+            collectEdges(engine_.getAgentStore(aid));
+        }
+    } else {
+        collectEdges(engine_.getAgentStore(agent_id_param));
+    }
+
+    // Optional user_id filter: keep only edges where both endpoints belong to the user
+    auto user_id_param = extractQueryParam(path, "user_id");
+    if (!user_id_param.empty()) {
+        // Build set of memory IDs belonging to this user
+        std::unordered_set<uint64_t> user_memory_ids;
+        auto addUserMemories = [&](Engine::AgentStore& store) {
+            MemoryStore::ListFilter uf;
+            uf.page = 1;
+            uf.per_page = 50000;
+            uf.user_id_filter = user_id_param;
+            auto result = store.memory->listMemories(uf);
+            for (const auto& rec : result.records) {
+                user_memory_ids.insert(rec.memory_id);
+            }
+        };
+        if (agent_id_param.empty()) {
+            for (const auto& aid : engine_.listAgents()) {
+                addUserMemories(engine_.getAgentStore(aid));
+            }
+        } else {
+            addUserMemories(engine_.getAgentStore(agent_id_param));
+        }
+
+        // Filter edges: at least one endpoint must belong to the user
+        std::vector<GraphEdge> filtered;
+        filtered.reserve(live_edges.size());
+        for (const auto& e : live_edges) {
+            if (user_memory_ids.count(e.from_id) || user_memory_ids.count(e.to_id)) {
+                filtered.push_back(e);
+            }
+        }
+        live_edges = std::move(filtered);
     }
 
     json resp;

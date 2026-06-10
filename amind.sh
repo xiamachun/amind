@@ -144,6 +144,9 @@ do_start() {
 
     echo -e "${GREEN}[START]${NC} Starting amind..."
 
+    # Raise file descriptor limit — each agent opens ~15 fds (WAL, LSM, HNSW, graph, etc.)
+    ulimit -n 65536 2>/dev/null || ulimit -n 32768 2>/dev/null || true
+
     # Use config file if exists
     local args=()
     if [[ -f "$CONFIG" ]]; then
@@ -243,8 +246,50 @@ do_stop() {
     echo -e "${GREEN}[STOP]${NC} amind stopped."
 }
 
+do_build_web() {
+    local web_dir="${SCRIPT_DIR}/web"
+    if [[ ! -d "$web_dir" ]]; then
+        echo -e "${YELLOW}[WEB]${NC} No web/ directory found, skipping frontend build."
+        return 0
+    fi
+
+    # Find node/npm via nvm or system PATH and ensure both node & npm are reachable
+    local node_dir=""
+    if [[ -d "${HOME}/.nvm/versions/node" ]]; then
+        local latest_node
+        latest_node=$(ls -d "${HOME}/.nvm/versions/node"/v* 2>/dev/null | sort -V | tail -1)
+        if [[ -n "$latest_node" && -x "${latest_node}/bin/npm" ]]; then
+            node_dir="${latest_node}/bin"
+        fi
+    fi
+    if [[ -z "$node_dir" ]] && command -v npm &>/dev/null; then
+        node_dir="$(dirname "$(command -v npm)")"
+    fi
+    if [[ -z "$node_dir" ]]; then
+        echo -e "${YELLOW}[WEB]${NC} npm not found, skipping frontend build."
+        return 0
+    fi
+
+    # Prepend node_dir to PATH so that npm, node, npx, tsc etc. are all reachable
+    export PATH="${node_dir}:${PATH}"
+
+    echo -e "${CYAN}[WEB]${NC} Building frontend (node: $(node --version 2>/dev/null))..."
+    cd "$web_dir"
+
+    # Install deps if node_modules missing
+    if [[ ! -d "node_modules" ]]; then
+        echo -e "  Installing dependencies..."
+        npm install --silent 2>&1 | tail -3
+    fi
+
+    npm run build 2>&1 | tail -3
+    echo -e "${GREEN}[WEB]${NC} Frontend built → web/dist/"
+    cd "$SCRIPT_DIR"
+}
+
 do_restart() {
     do_stop
+    do_build_web
     sleep 1
     do_start
 }

@@ -65,6 +65,15 @@ export default function Events() {
   const [ringSize, setRingSize] = useState(0)
   const [loading, setLoading] = useState(false)
   const [resurrectMsg, setResurrectMsg] = useState('')
+  const [agentIds, setAgentIds] = useState<string[]>([])
+
+  useEffect(() => {
+    api.listAgentIds().then(list => {
+      // Extract unique base agent_id (before first colon) for cleaner dropdown
+      const bases = Array.from(new Set(list.map(a => a.agent_id.split(':')[0]).filter(Boolean)))
+      setAgentIds(bases.sort())
+    }).catch(() => {})
+  }, [])
 
   // URL-driven filters; preset by Layout quick-filter links.
   const kindFilter = (params.get('kind') as EventKind) || ''
@@ -172,16 +181,19 @@ export default function Events() {
           <option value="">All statuses</option>
           {ALL_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
-        <input value={agentIdFilter} onChange={e => updateParam('agent_id', e.target.value)}
-          placeholder="agent_id..."
+        <input type="text" placeholder="agent_id..."
+          defaultValue={agentIdFilter}
+          list="events-agent-id-list"
+          onChange={e => {
+            const val = e.target.value
+            if (val === '' || agentIds.includes(val)) updateParam('agent_id', val)
+          }}
+          onKeyDown={e => e.key === 'Enter' && updateParam('agent_id', (e.target as HTMLInputElement).value)}
           className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-300 w-48" />
-        <input value={memFilter} onChange={e => updateParam('memory_id', e.target.value)}
-          placeholder="memory_id..."
-          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-300 w-44 font-mono text-xs" />
-        <input value={traceFilter} onChange={e => updateParam('trace_id', e.target.value)}
-          placeholder="trace_id..."
-          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-300 w-44 font-mono text-xs" />
-        {(kindFilter || statusFilter || agentIdFilter || memFilter || traceFilter) && (
+        <datalist id="events-agent-id-list">
+          {agentIds.map(aid => <option key={aid} value={aid} />)}
+        </datalist>
+        {(kindFilter || statusFilter || agentIdFilter) && (
           <button onClick={() => setParams(new URLSearchParams())}
             className="ml-auto text-xs px-2 py-1 rounded bg-gray-800 text-gray-400 hover:bg-gray-700">
             Clear filters

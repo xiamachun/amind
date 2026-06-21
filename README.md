@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://isocpp.org/"><img src="https://img.shields.io/badge/C%2B%2B-20-blue.svg" alt="C++20"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-v0.1-orange.svg" alt="Version">
+  <img src="https://img.shields.io/github/v/release/xiamachun/amind?color=orange&label=version" alt="Version">
 </p>
 
 <p align="center"><b>Production-grade memory engine for AI Agents.</b></p>
@@ -43,7 +43,7 @@ Amind gives AI Agents a persistent, version-tracked memory system with metacogni
 ├──────────────────────────────────────────────────────────┤
 │  Intelligence   Capture Pipeline │ Retrieval │ MetaCog   │
 ├──────────────────────────────────────────────────────────┤
-│  Async          TaskQueue  │  TaskExecutor (thread pool)  │
+│  Async          TaskQueue  │  TaskExecutor (thread pool) │
 ├──────────────────────────────────────────────────────────┤
 │  Index          HNSW Vector │ LSM-Tree │ Graph Store     │
 ├──────────────────────────────────────────────────────────┤
@@ -57,8 +57,9 @@ No compilation needed — download and run:
 
 ```bash
 # Linux x86_64
-curl -LO https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-linux-amd64.tar.gz
-tar xzf amind-v0.1.0-linux-amd64.tar.gz && cd amind-v0.1.0-linux-amd64
+VERSION=$(curl -s https://api.github.com/repos/xiamachun/amind/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+curl -LO "https://github.com/xiamachun/amind/releases/download/${VERSION}/amind-${VERSION}-linux-amd64.tar.gz"
+tar xzf amind-${VERSION}-linux-amd64.tar.gz && cd amind-${VERSION}-linux-amd64
 
 # Initialize config
 cp amind.conf.example amind.conf
@@ -75,8 +76,9 @@ vim amind.conf  # Fill in your LLM API Key and Embedding config
 
 ```bash
 # macOS Apple Silicon (M1/M2/M3/M4)
-curl -LO https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-darwin-arm64.tar.gz
-tar xzf amind-v0.1.0-darwin-arm64.tar.gz && cd amind-v0.1.0-darwin-arm64
+VERSION=$(curl -s https://api.github.com/repos/xiamachun/amind/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+curl -LO "https://github.com/xiamachun/amind/releases/download/${VERSION}/amind-${VERSION}-darwin-arm64.tar.gz"
+tar xzf amind-${VERSION}-darwin-arm64.tar.gz && cd amind-${VERSION}-darwin-arm64
 
 # Remove macOS Gatekeeper quarantine flag (required on first download)
 xattr -cr .
@@ -96,9 +98,9 @@ vim amind.conf  # Fill in your LLM API Key and Embedding config
 
 | Platform | Download | Use Case |
 |----------|----------|----------|
-| **Linux x86_64** | [amind-v0.1.0-linux-amd64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-linux-amd64.tar.gz) | Cloud servers, VPS, Docker |
-| **Linux ARM64** | [amind-v0.1.0-linux-arm64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-linux-arm64.tar.gz) | AWS Graviton, Raspberry Pi, Oracle ARM |
-| **macOS Apple Silicon** | [amind-v0.1.0-darwin-arm64.tar.gz](https://github.com/xiamachun/amind/releases/latest/download/amind-v0.1.0-darwin-arm64.tar.gz) | M1/M2/M3/M4 Mac |
+| **Linux x86_64** | [amind-linux-amd64.tar.gz](https://github.com/xiamachun/amind/releases/latest) | Cloud servers, VPS, Docker |
+| **Linux ARM64** | [amind-linux-arm64.tar.gz](https://github.com/xiamachun/amind/releases/latest) | AWS Graviton, Raspberry Pi, Oracle ARM |
+| **macOS Apple Silicon** | [amind-darwin-arm64.tar.gz](https://github.com/xiamachun/amind/releases/latest) | M1/M2/M3/M4 Mac |
 
 > **System requirements:** Linux (Ubuntu 20.04+ / Debian 11+ / CentOS 9+ / RHEL 9+), macOS 12+.
 

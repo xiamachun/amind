@@ -8,7 +8,7 @@
 namespace amind {
 
 /// amind version string (single source of truth).
-constexpr const char* AMIND_VERSION = "0.3.0";
+constexpr const char* AMIND_VERSION = "0.6.0";
 
 /// Application configuration loaded from amind.conf + environment overrides.
 class AppConfig {

@@ -180,7 +180,7 @@ v2_conflict_resolver_enabled = false
 v2_consolidation_enabled = false
 v2_reconcile_enabled = true
 v2_reconcile_similarity_floor = 0.30
-v2_reconcile_max_neighbours = 3
+v2_reconcile_max_neighbours = 15
 v2_global_shadow_mode = false
 
 # ── WriteGate thresholds ──

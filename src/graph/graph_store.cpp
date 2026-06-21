@@ -182,6 +182,19 @@ std::vector<GraphEdge> GraphStore::getConflicts() const {
     return conflicts;
 }
 
+std::vector<GraphEdge> GraphStore::getSupersedes() const {
+    std::lock_guard lock(mutex_);
+    std::vector<GraphEdge> result;
+    for (const auto& [id, edges] : adjacency_) {
+        for (const auto& edge : edges) {
+            if (edge.type == EdgeType::Supersedes) {
+                result.push_back(edge);
+            }
+        }
+    }
+    return result;
+}
+
 std::vector<uint64_t> GraphStore::traverse(uint64_t start_id, int max_depth) const {
     std::lock_guard lock(mutex_);
     std::vector<uint64_t> result;

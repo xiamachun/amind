@@ -59,9 +59,14 @@ Result<void, Error> RestServer::start() {
     spdlog::info("REST server listening on {}:{}", host_, port_);
 
     // Start worker thread pool
+    // Use a larger pool to prevent starvation when LLM/embedding calls block workers.
+    // With synchronous handlers that make 10-30s HTTP calls, we need enough workers
+    // to handle concurrent slow requests while keeping fast endpoints (health, metrics)
+    // responsive. Using max(max_connections, hw_threads * 2) ensures we have sufficient
+    // capacity even under heavy load.
     size_t hw_threads = std::thread::hardware_concurrency();
     if (hw_threads == 0) hw_threads = 4;
-    size_t num_workers = std::min(static_cast<size_t>(max_connections_), hw_threads);
+    size_t num_workers = std::max(static_cast<size_t>(max_connections_), hw_threads * 2);
     for (size_t i = 0; i < num_workers; i++) {
         workers_.emplace_back([this]() { workerLoop(); });
     }
@@ -419,6 +424,18 @@ std::string RestServer::handleStore(const std::string& body) {
             return errorResponse(500, result.error().toString());
         }
 
+        // Optional: wait for Stage 2 async refinement to complete before returning.
+        // This is useful for testing and scenarios where the caller needs to ensure
+        // the memory is fully processed (embedding, fact extraction, reconciliation)
+        // before proceeding. Default is false for backward compatibility.
+        bool wait_for_stage2 = j.value("wait_for_stage2", false);
+        if (wait_for_stage2 && !result->empty()) {
+            // Use the first memory_id to compute the namespace hash
+            auto& pipeline = engine_.capturePipelineFor(agent_id);
+            uint64_t ns_hash = std::hash<std::string>{}(agent_id);
+            pipeline.waitForPendingRefinements(ns_hash, std::chrono::milliseconds(10000));
+        }
+
         json resp;
         {
             json ids_arr = json::array();
@@ -426,6 +443,9 @@ std::string RestServer::handleStore(const std::string& body) {
             resp["memory_ids"] = std::move(ids_arr);
         }
         resp["async_refinement_scheduled"] = true;
+        if (wait_for_stage2) {
+            resp["stage2_completed"] = true;
+        }
         return jsonResponse(200, resp.dump());
     } catch (const json::exception& e) {
         return errorResponse(400, "invalid JSON: " + std::string(e.what()));
@@ -689,16 +709,6 @@ std::string RestServer::handleIntercept(const std::string& body) {
     }
 }
 
-std::string RestServer::handleCoverage(const std::string& query) {
-    auto stats = engine_.metaCognition().getCoverage("");
-    json resp;
-    resp["total_memories"] = stats.total;
-    resp["active_memories"] = stats.active;
-    resp["stale_memories"] = stats.stale;
-    resp["conflicted_memories"] = stats.conflicted;
-    return jsonResponse(200, resp.dump());
-}
-
 std::string RestServer::handleConflicts() {
     auto conflicts = engine_.metaCognition().getConflicts();
     json resp = json::array();
@@ -846,6 +856,11 @@ std::string RestServer::handleListMemories(const std::string& path) {
         if (!pp_str.empty()) filter.per_page = std::stoi(pp_str);
     } catch (const std::exception&) {
         return errorResponse(400, "invalid page/per_page parameter");
+    }
+
+    // Validate pagination parameters
+    if (filter.page < 1 || filter.per_page < 1 || filter.per_page > 10000) {
+        return errorResponse(400, "page must be >= 1, per_page must be 1-10000");
     }
     
     // Extract filter parameters
@@ -1146,33 +1161,46 @@ std::string RestServer::handleListSessions() {
 }
 
 std::string RestServer::handleCoverageStats(const std::string& agent_id) {
-    auto stats = engine_.metaCognition().getCoverage(agent_id);
+    CoverageStats stats;
+    stats.last_updated = MemoryRecord::currentTimeSec();
+    json scope_dist = json::object(), type_dist = json::object(),
+         phase_dist = json::object(), confidence_dist = json::object(),
+         tier_dist = json::object();
+
+    auto accumulate = [&](const std::string& aid) {
+        auto& agent_store = engine_.getAgentStore(aid);
+        agent_store.memory->scanAll([&](const MemoryRecord& rec) {
+            if (!agent_id.empty() && rec.agent_id != agent_id) return;
+            stats.total++;
+            if (rec.phase == MemoryPhase::Active) stats.active++;
+            if (rec.confidence_level == Confidence::Stale) stats.stale++;
+            if (rec.confidence_level == Confidence::Conflicted) stats.conflicted++;
+            std::string type_key = memoryTypeToString(rec.memory_type);
+            stats.topic_distribution[type_key]++;
+            type_dist[type_key] = (type_dist.contains(type_key) ? type_dist[type_key].get<int>() : 0) + 1;
+            std::string sc = scopeToString(rec.scope);
+            std::string ph = phaseToString(rec.phase);
+            std::string cf = confidenceToString(rec.confidence_level);
+            std::string tr = memoryTierToString(rec.tier);
+            scope_dist[sc] = (scope_dist.contains(sc) ? scope_dist[sc].get<int>() : 0) + 1;
+            phase_dist[ph] = (phase_dist.contains(ph) ? phase_dist[ph].get<int>() : 0) + 1;
+            confidence_dist[cf] = (confidence_dist.contains(cf) ? confidence_dist[cf].get<int>() : 0) + 1;
+            tier_dist[tr] = (tier_dist.contains(tr) ? tier_dist[tr].get<int>() : 0) + 1;
+        });
+    };
+
+    if (agent_id.empty()) {
+        for (const auto& aid : engine_.listAgents()) accumulate(aid);
+    } else {
+        accumulate(agent_id);
+    }
+
     json resp;
     resp["total"] = stats.total;
     resp["active"] = stats.active;
     resp["stale"] = stats.stale;
     resp["conflicted"] = stats.conflicted;
     resp["last_updated"] = stats.last_updated;
-
-    // Add scope/type/phase/confidence/tier distribution — route to agent store
-    json scope_dist = json::object(), type_dist = json::object(),
-         phase_dist = json::object(), confidence_dist = json::object(),
-         tier_dist = json::object();
-    auto effective_agent_id = agent_id.empty() ? std::string("default") : agent_id;
-    auto& agent_store = engine_.getAgentStore(effective_agent_id);
-    agent_store.memory->scanAll([&](const MemoryRecord& rec) {
-        std::string sc = scopeToString(rec.scope);
-        std::string tp = memoryTypeToString(rec.memory_type);
-        std::string ph = phaseToString(rec.phase);
-        std::string cf = confidenceToString(rec.confidence_level);
-        std::string tr = memoryTierToString(rec.tier);
-        
-        scope_dist[sc] = (scope_dist.contains(sc) ? scope_dist[sc].get<int>() : 0) + 1;
-        type_dist[tp] = (type_dist.contains(tp) ? type_dist[tp].get<int>() : 0) + 1;
-        phase_dist[ph] = (phase_dist.contains(ph) ? phase_dist[ph].get<int>() : 0) + 1;
-        confidence_dist[cf] = (confidence_dist.contains(cf) ? confidence_dist[cf].get<int>() : 0) + 1;
-        tier_dist[tr] = (tier_dist.contains(tr) ? tier_dist[tr].get<int>() : 0) + 1;
-    });
     resp["scope_distribution"] = scope_dist;
     resp["memory_type_distribution"] = type_dist;
     resp["phase_distribution"] = phase_dist;
@@ -1296,8 +1324,8 @@ std::string RestServer::handleHealth() {
 
 std::string RestServer::handleMetrics() {
     json resp;
-    resp["total_memories"] = engine_.memoryStore().totalMemories();
-    resp["graph_edges"] = engine_.graphStore().edgeCount();
+    resp["total_memories"] = engine_.totalMemories();
+    resp["graph_edges"] = engine_.totalGraphEdges();
     resp["pool_connections"] = engine_.connectionPool().pooledCount();
     resp["pool_total_acquired"] = engine_.connectionPool().totalAcquired();
     resp["pool_total_reused"] = engine_.connectionPool().totalReused();

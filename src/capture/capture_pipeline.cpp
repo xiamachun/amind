@@ -229,6 +229,19 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
             }
         }
 
+        // ── Anti-echo: skip fact extraction for assistant messages ──
+        // Assistant responses are stored as Raw (still searchable via vector recall)
+        // but we don't extract Derived facts from them to avoid the "echo effect"
+        // where the assistant parrots user info back, creating duplicate memories.
+        {
+            auto role_it = record.user_metadata.find("role");
+            if (role_it != record.user_metadata.end() && role_it->second == "assistant") {
+                spdlog::debug("Stage2: skip extractFacts for assistant Raw {} (anti-echo): '{}'",
+                              memory_id, record.content.substr(0, 80));
+                return;
+            }
+        }
+
         // Extract facts via LLM (skipped when pre_extracted — content is already a clean fact)
         std::vector<ExtractedFact> fact_list;
         bool extract_failed = false;
@@ -396,7 +409,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                             if (rec->layer != MemoryLayer::Derived) continue;
                             seen_ids.insert(nid);
                             neigh.emplace_back(std::move(*rec), sim);
-                            if (neigh.size() >= 5) break;
+                            if (neigh.size() >= 20) break;
                         }
 
                         // Keyword fallback path (CJK-friendly): scan all derived
@@ -474,7 +487,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                 if (seen_ids.count(rec.memory_id)) continue;
                                 seen_ids.insert(rec.memory_id);
                                 neigh.emplace_back(std::move(rec), score);
-                                if (neigh.size() >= 5) break;
+                                if (neigh.size() >= 20) break;
                             }
                         }
 
@@ -525,7 +538,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                           return std::get<0>(a) > std::get<0>(b);
                                       });
                             for (auto& [ts, rec] : temporal_hits) {
-                                if (neigh.size() >= 5) break;
+                                if (neigh.size() >= 20) break;
                                 if (seen_ids.count(rec.memory_id)) continue;
                                 seen_ids.insert(rec.memory_id);
                                 // Sentinel similarity 0.50 — recognizable in
@@ -573,7 +586,7 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                     if (rec->layer != MemoryLayer::Derived) continue;
                                     seen_ids.insert(nid);
                                     neigh.emplace_back(std::move(*rec), sim);
-                                    if (neigh.size() >= 5) break;
+                                    if (neigh.size() >= 20) break;
                                 }
                                 spdlog::info("Reconciler slot re-search after lock: neigh.size={}",
                                              neigh.size());
@@ -581,6 +594,41 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                         }
 
                         reconcile_decision = reconciler_->decide(cand.content, neigh);
+
+                        // ── Temporal qualifier safeguard ──────────────────────
+                        // If the raw user message contains temporal qualifiers
+                        // ("之前的", "旧的", "previous", "old", etc.) but the
+                        // extracted candidate does NOT, the DerivedExtractor
+                        // stripped the temporal context. In that case, a REPLACE
+                        // decision is wrong — the user is describing a SEPARATE
+                        // historical fact, not updating a current one. Override
+                        // REPLACE → NOOP: the stripped fact (e.g. "用户的护照编号
+                        // 是E73291047" without "旧的") is not a valid standalone
+                        // memory and must not be stored.
+                        if (reconcile_decision.op == ReconcileOp::REPLACE) {
+                            static const std::vector<std::string> temporal_markers = {
+                                "之前的", "旧的", "以前的", "过去的", "原来", "曾经",
+                                "previous", "former", "old passport", "old phone"
+                            };
+                            bool raw_has_temporal = false;
+                            bool cand_has_temporal = false;
+                            for (const auto& m : temporal_markers) {
+                                if (record.content.find(m) != std::string::npos) raw_has_temporal = true;
+                                if (cand.content.find(m) != std::string::npos) cand_has_temporal = true;
+                            }
+                            if (raw_has_temporal && !cand_has_temporal) {
+                                spdlog::info("Reconciler: overriding REPLACE→NOOP — raw input has "
+                                             "temporal qualifier but extracted candidate does not; "
+                                             "stripped fact must not be stored");
+                                reconcile_decision.op = ReconcileOp::NOOP;
+                                reconcile_decision.target_ids.clear();
+                                reconcile_decision.target_id = 0;
+                                reconcile_decision.rationale =
+                                    "temporal qualifier in raw input stripped by extractor; "
+                                    "stripped fact not stored; " + reconcile_decision.rationale;
+                            }
+                        }
+
                         reconciled = true;
 
                         // Emit Reconcile event for unified observability.
@@ -606,61 +654,100 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                 // Keep derived as-is.
                                 break;
                             case ReconcileOp::REPLACE: {
-                                // Tombstone the older fact + link new.parent_id = old.
-                                auto old_rec = store_.peek(reconcile_decision.target_id);
+                                // Tombstone all older facts + link Supersedes edges.
+                                // Multi-target: one correction can supersede several
+                                // existing facts that all reference the same outdated value.
+                                std::vector<std::vector<float>> superseded_embeddings;
 
-                                // Timestamp guard: if target is newer than candidate,
-                                // out-of-order Stage 2 processing caused the older fact
-                                // to arrive after the newer one. Drop the candidate instead.
-                                if (old_rec.ok()) {
-                                    auto cand_rec = store_.peek(result.derived_id);
-                                    if (cand_rec.ok() && old_rec->created_at > cand_rec->created_at) {
-                                        store_.remove(result.derived_id);
-                                        spdlog::info("Reconciler REPLACE(reversed): candidate {} (t={}) is older than target {} (t={}), dropping candidate",
-                                                     result.derived_id, cand_rec->created_at,
-                                                     reconcile_decision.target_id, old_rec->created_at);
-                                        break;
+                                for (auto old_target_id : reconcile_decision.target_ids) {
+                                    auto old_rec = store_.peek(old_target_id);
+
+                                    // Guard: skip already-tombstoned targets.
+                                    if (old_rec.ok() && !old_rec->isAlive()) {
+                                        spdlog::info("Reconciler REPLACE(skipped): target {} already tombstoned",
+                                                     old_target_id);
+                                        continue;
                                     }
+
+                                    // Timestamp guard: if target's Raw is newer than candidate's Raw,
+                                    // out-of-order Stage 2 processing caused the older fact
+                                    // to arrive after the newer one. Reverse this one target.
+                                    if (old_rec.ok()) {
+                                        auto cand_rec = store_.peek(result.derived_id);
+                                        if (cand_rec.ok()
+                                            && old_rec->parent_id != 0
+                                            && cand_rec->parent_id != 0) {
+                                            auto old_raw = store_.peek(old_rec->parent_id);
+                                            auto cand_raw = store_.peek(cand_rec->parent_id);
+                                            if (old_raw.ok() && cand_raw.ok()
+                                                && old_raw->created_at > cand_raw->created_at) {
+                                                store_.remove(result.derived_id);
+                                                store_.remove(cand_rec->parent_id);
+                                                graph_.addEdge(old_target_id,
+                                                               result.derived_id,
+                                                               EdgeType::Supersedes, 1.0f);
+                                                spdlog::info("Reconciler REPLACE(reversed): target {} Raw is newer, dropping candidate",
+                                                             old_target_id);
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    store_.remove(old_target_id);
+                                    if (old_rec.ok() && old_rec->parent_id != 0) {
+                                        store_.remove(old_rec->parent_id);
+                                        spdlog::debug("REPLACE: also tombstoned Raw parent {} of superseded Derived {}",
+                                                     old_rec->parent_id, old_target_id);
+                                    }
+                                    if (old_rec.ok() && !old_rec->embedding.empty()) {
+                                        superseded_embeddings.push_back(old_rec->embedding);
+                                    }
+                                    graph_.addEdge(result.derived_id, old_target_id,
+                                                   EdgeType::Supersedes, 1.0f);
+                                    spdlog::info("Reconciler REPLACE: {} ({}) supersedes {} — {}",
+                                                 result.derived_id,
+                                                 cand.content.substr(0, 40),
+                                                 old_target_id,
+                                                 reconcile_decision.rationale);
                                 }
 
-                                store_.remove(reconcile_decision.target_id);
-                                graph_.addEdge(result.derived_id,
-                                               reconcile_decision.target_id,
-                                               EdgeType::Supersedes, 1.0f);
-                                spdlog::info("Reconciler REPLACE: {} ({}) supersedes {} — {}",
-                                             result.derived_id,
-                                             cand.content.substr(0, 40),
-                                             reconcile_decision.target_id,
-                                             reconcile_decision.rationale);
-
                                 // ── Cascade: tombstone sibling memories that
-                                // reference the same old value. Parallel LLM
-                                // calls — total time = max(single) not sum(all).
-                                if (old_rec.ok() && !old_rec->embedding.empty()) {
-                                    auto siblings = store_.searchSimilar(old_rec->embedding, 20);
+                                // reference the same old value(s). Uses ALL
+                                // superseded targets' embeddings for broader coverage.
+                                {
+                                    std::unordered_set<uint64_t> cascade_seen;
+                                    cascade_seen.insert(result.derived_id);
+                                    for (auto tid : reconcile_decision.target_ids) cascade_seen.insert(tid);
 
-                                    // Collect eligible siblings first
                                     struct SiblingInfo { uint64_t id; float sim; MemoryRecord rec; };
                                     std::vector<SiblingInfo> eligible;
-                                    for (const auto& [sid, sim] : siblings) {
-                                        if (sid == reconcile_decision.target_id) continue;
-                                        if (sid == result.derived_id) continue;
-                                        if (sid >= result.derived_id) continue;
-                                        if (sim < 0.35f) continue;
-                                        auto srec = store_.peek(sid);
-                                        if (!srec.ok() || !srec->isAlive()) continue;
-                                        if (srec->agent_id != target_agent_id) continue;
-                                        if (srec->layer != MemoryLayer::Derived) continue;
-                                        eligible.push_back({sid, sim, std::move(*srec)});
+
+                                    for (const auto& old_emb : superseded_embeddings) {
+                                        auto siblings = store_.searchSimilar(old_emb, 20);
+                                        for (const auto& [sid, sim] : siblings) {
+                                            if (cascade_seen.count(sid)) continue;
+                                            if (sid >= result.derived_id) continue;
+                                            if (sim < 0.35f) continue;
+                                            auto srec = store_.peek(sid);
+                                            if (!srec.ok() || !srec->isAlive()) continue;
+                                            if (srec->agent_id != target_agent_id) continue;
+                                            cascade_seen.insert(sid);
+                                            if (srec->layer != MemoryLayer::Derived) {
+                                                if (srec->layer == MemoryLayer::Raw && sim >= 0.85f) {
+                                                    store_.remove(sid);
+                                                    spdlog::debug("CASCADE: tombstone Raw sibling {} (sim={:.3f})", sid, sim);
+                                                }
+                                                continue;
+                                            }
+                                            eligible.push_back({sid, sim, std::move(*srec)});
+                                        }
                                     }
 
-                                    // Limit concurrent LLM calls
                                     static constexpr size_t kMaxConcurrentReconcile = 4;
                                     if (eligible.size() > kMaxConcurrentReconcile) {
                                         eligible.resize(kMaxConcurrentReconcile);
                                     }
 
-                                    // Fire LLM calls in parallel
                                     std::vector<std::future<ReconcileDecision>> futures;
                                     futures.reserve(eligible.size());
                                     for (auto& sib : eligible) {
@@ -672,7 +759,6 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                             }));
                                     }
 
-                                    // Collect results and tombstone
                                     for (size_t fi = 0; fi < futures.size(); ++fi) {
                                         auto sib_decision = futures[fi].get();
                                         if (sib_decision.op == ReconcileOp::REPLACE
@@ -686,49 +772,77 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                                 break;
                             }
                             case ReconcileOp::RETRACT: {
-                                // Tombstone target AND the just-stored fact
+                                // Tombstone all targets AND the just-stored fact
                                 // (the candidate is a negation, not new info).
-                                auto retract_rec = store_.peek(reconcile_decision.target_id);
+                                // Multi-target: one negation can invalidate several
+                                // existing facts that all reference the same outdated value.
+                                std::vector<std::vector<float>> retract_embeddings;
+                                bool any_retracted = false;
 
-                                // Timestamp guard: if target is newer, the retraction
-                                // is stale — only remove the candidate.
-                                {
-                                    auto cand_rec = store_.peek(result.derived_id);
-                                    if (retract_rec.ok() && cand_rec.ok()
-                                        && retract_rec->created_at > cand_rec->created_at) {
-                                        store_.remove(result.derived_id);
-                                        spdlog::info("Reconciler RETRACT(reversed): candidate {} (t={}) is older than target {} (t={}), dropping candidate only",
-                                                     result.derived_id, cand_rec->created_at,
-                                                     reconcile_decision.target_id, retract_rec->created_at);
-                                        break;
+                                for (auto retract_target_id : reconcile_decision.target_ids) {
+                                    auto retract_rec = store_.peek(retract_target_id);
+
+                                    // Guard: skip already-tombstoned targets.
+                                    if (retract_rec.ok() && !retract_rec->isAlive()) {
+                                        spdlog::info("Reconciler RETRACT(skipped): target {} already tombstoned",
+                                                     retract_target_id);
+                                        continue;
                                     }
+
+                                    // Timestamp guard: if target is newer, the retraction
+                                    // is stale — skip this target (don't remove candidate yet).
+                                    {
+                                        auto cand_rec = store_.peek(result.derived_id);
+                                        if (retract_rec.ok() && cand_rec.ok()
+                                            && retract_rec->created_at > cand_rec->created_at) {
+                                            spdlog::info("Reconciler RETRACT(reversed): candidate {} (t={}) is older than target {} (t={}), skipping",
+                                                         result.derived_id, cand_rec->created_at,
+                                                         retract_target_id, retract_rec->created_at);
+                                            continue;
+                                        }
+                                    }
+
+                                    store_.remove(retract_target_id);
+                                    any_retracted = true;
+                                    if (retract_rec.ok() && !retract_rec->embedding.empty()) {
+                                        retract_embeddings.push_back(retract_rec->embedding);
+                                    }
+                                    spdlog::info("Reconciler RETRACT: removed target {} — {}",
+                                                 retract_target_id,
+                                                 reconcile_decision.rationale);
                                 }
 
-                                store_.remove(reconcile_decision.target_id);
-                                store_.remove(result.derived_id);
-                                spdlog::info("Reconciler RETRACT: removed both {} and just-stored {} — {}",
-                                             reconcile_decision.target_id, result.derived_id,
-                                             reconcile_decision.rationale);
+                                // Remove the candidate (negation) once if anything was retracted.
+                                if (any_retracted) {
+                                    store_.remove(result.derived_id);
+                                    spdlog::info("Reconciler RETRACT: removed just-stored negation {}",
+                                                 result.derived_id);
+                                }
 
-                                // Cascade: tombstone siblings of the retracted fact (parallel)
-                                if (retract_rec.ok() && !retract_rec->embedding.empty()) {
-                                    auto siblings = store_.searchSimilar(retract_rec->embedding, 20);
+                                // Cascade: tombstone siblings of all retracted facts (parallel)
+                                {
+                                    std::unordered_set<uint64_t> cascade_seen;
+                                    cascade_seen.insert(result.derived_id);
+                                    for (auto tid : reconcile_decision.target_ids) cascade_seen.insert(tid);
 
                                     struct SiblingInfo { uint64_t id; float sim; MemoryRecord rec; };
                                     std::vector<SiblingInfo> eligible;
-                                    for (const auto& [sid, sim] : siblings) {
-                                        if (sid == reconcile_decision.target_id) continue;
-                                        if (sid == result.derived_id) continue;
-                                        if (sid >= result.derived_id) continue;
-                                        if (sim < 0.35f) continue;
-                                        auto srec = store_.peek(sid);
-                                        if (!srec.ok() || !srec->isAlive()) continue;
-                                        if (srec->agent_id != target_agent_id) continue;
-                                        if (srec->layer != MemoryLayer::Derived) continue;
-                                        eligible.push_back({sid, sim, std::move(*srec)});
+
+                                    for (const auto& retract_emb : retract_embeddings) {
+                                        auto siblings = store_.searchSimilar(retract_emb, 20);
+                                        for (const auto& [sid, sim] : siblings) {
+                                            if (cascade_seen.count(sid)) continue;
+                                            if (sid >= result.derived_id) continue;
+                                            if (sim < 0.35f) continue;
+                                            auto srec = store_.peek(sid);
+                                            if (!srec.ok() || !srec->isAlive()) continue;
+                                            if (srec->agent_id != target_agent_id) continue;
+                                            cascade_seen.insert(sid);
+                                            if (srec->layer != MemoryLayer::Derived) continue;
+                                            eligible.push_back({sid, sim, std::move(*srec)});
+                                        }
                                     }
 
-                                    // Limit concurrent LLM calls
                                     static constexpr size_t kMaxConcurrentReconcile = 4;
                                     if (eligible.size() > kMaxConcurrentReconcile) {
                                         eligible.resize(kMaxConcurrentReconcile);
@@ -760,11 +874,21 @@ void CapturePipeline::scheduleRefinement(uint64_t memory_id,
                             case ReconcileOp::REINFORCE: {
                                 // Drop the just-stored fact; bump importance of
                                 // the existing one (repeated mention = stronger signal).
+                                // Guard: if target was already tombstoned by a prior
+                                // REPLACE (race condition with concurrent corrections),
+                                // skip the boost to avoid resurrecting dead memories.
                                 store_.remove(result.derived_id);
-                                store_.boostImportance(reconcile_decision.target_id, 0.1f);
-                                spdlog::info("Reconciler REINFORCE: dropped {}, boosted existing {} (+0.1) — {}",
-                                             result.derived_id, reconcile_decision.target_id,
-                                             reconcile_decision.rationale);
+                                auto target_check = store_.peek(reconcile_decision.target_id);
+                                if (target_check.ok() && target_check->isAlive()) {
+                                    store_.boostImportance(reconcile_decision.target_id, 0.1f);
+                                    spdlog::info("Reconciler REINFORCE: dropped {}, boosted existing {} (+0.1) — {}",
+                                                 result.derived_id, reconcile_decision.target_id,
+                                                 reconcile_decision.rationale);
+                                } else {
+                                    spdlog::info("Reconciler REINFORCE(skipped): dropped {}, target {} already tombstoned — {}",
+                                                 result.derived_id, reconcile_decision.target_id,
+                                                 reconcile_decision.rationale);
+                                }
                                 break;
                             }
                             case ReconcileOp::NOOP: {
@@ -863,15 +987,30 @@ Result<std::vector<uint64_t>> CapturePipeline::interceptCapture(
     const std::vector<std::pair<std::string, std::string>>& messages,
     const std::string& agent_id,
     const std::string& user_id) {
-    // Simple implementation: concatenate user messages and capture
-    std::string combined;
+    // Capture each message individually with role metadata.
+    // Assistant messages are tagged with role=assistant so Stage 2 can skip
+    // extractFacts for them, avoiding the "echo effect" where the assistant's
+    // parroting of user info creates duplicate derived facts.
+    std::vector<uint64_t> all_ids;
     for (const auto& [role, content] : messages) {
-        if (role == "user" || role == "assistant") {
-            combined += content + "\n";
+        if (role != "user" && role != "assistant") continue;
+        if (content.empty()) continue;
+
+        std::map<std::string, std::string> meta;
+        if (role == "assistant") {
+            meta["role"] = "assistant";
+        }
+
+        auto result = capture(content, agent_id, user_id,
+                              MemoryScope::Private, MemoryType::Ephemeral, std::move(meta));
+        if (result.ok()) {
+            for (auto id : *result) {
+                all_ids.push_back(id);
+            }
         }
     }
-    if (combined.empty()) return std::vector<uint64_t>{};
-    return capture(combined, agent_id, user_id, MemoryScope::Private, MemoryType::Ephemeral);
+    if (all_ids.empty()) return std::vector<uint64_t>{};
+    return all_ids;
 }
 
 Result<ExtractionResult> CapturePipeline::extractFacts(const std::string& content) {

@@ -6,8 +6,10 @@
 #include <cctype>
 #include <cmath>
 #include <limits>
+#include <queue>
 #include <random>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -154,6 +156,174 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
             candidates.end());
     }
 
+    // ── Global Supersedes scan ────────────────────────────────────────────────
+    // Fetch all Supersedes edges once. Used by both the Raw parent filter and
+    // the content-level filter below. Global scan ensures filtering works even
+    // when the superseding memory is not in the recall candidate set.
+    auto all_supersedes = graph_.getSupersedes();
+
+    // ── Superseded Raw filter ─────────────────────────────────────────────────
+    // If a Derived memory D has been superseded by another Derived memory D',
+    // then the Raw memory that D was extracted from should also be suppressed
+    // (the fact it describes is no longer current). This prevents recall from
+    // surfacing stale facts via their Raw memories.
+    std::unordered_set<uint64_t> superseded_derived_parents;
+    for (const auto& edge : all_supersedes) {
+        auto superseded = store_.peek(edge.to_id);
+        if (superseded.ok()
+            && superseded->layer == MemoryLayer::Derived
+            && superseded->parent_id != 0) {
+            superseded_derived_parents.insert(superseded->parent_id);
+        }
+    }
+    if (!superseded_derived_parents.empty()) {
+        candidates.erase(
+            std::remove_if(candidates.begin(), candidates.end(),
+                           [&superseded_derived_parents](const ScoredMemory& sm) {
+                               return sm.record.layer == MemoryLayer::Raw
+                                   && superseded_derived_parents.count(sm.record.memory_id);
+                           }),
+            candidates.end());
+    }
+
+    // ── Content-level superseded filter ─────────────────────────────────
+    // Raw/Derived memories whose content closely overlaps with superseded
+    // Derived facts should also be suppressed, even if they aren't direct
+    // parents. This catches memories from different source turns that mention
+    // the same old entity (e.g. "我的特斯拉每周充两次电" when the Tesla car
+    // fact was superseded by "用户的车是比亚迪汉EV").
+    // Timestamp guard: only filter candidates OLDER than the superseding fact
+    // to avoid filtering the correction itself.
+    // Chain walk: when D3 supersedes D2 which supersedes D1, we collect ALL
+    // old values (D1, D2, and their Raw parents) so that Raw memories
+    // mentioning ANY historical value are caught — not just the most recent
+    // superseded content. This handles multi-hop value changes like
+    // salary 2万 → 3万 → 4万 where Raw echoes of "2万" would otherwise leak.
+    {
+        struct SupersededInfo {
+            std::string content;
+            uint32_t superseding_ts;  // created_at of the terminal superseding fact
+        };
+        std::vector<SupersededInfo> superseded_infos;
+
+        // Build superseding map: to_id → from_id (superseded → who superseded it)
+        std::unordered_map<uint64_t, uint64_t> superseding_map;
+        for (const auto& edge : all_supersedes) {
+            superseding_map[edge.to_id] = edge.from_id;
+        }
+
+        std::unordered_set<uint64_t> visited_global;
+        for (const auto& edge : all_supersedes) {
+            // Find the terminal (alive) superseding fact by walking UP the chain
+            uint64_t terminal_id = edge.from_id;
+            {
+                std::unordered_set<uint64_t> up_visited;
+                uint64_t cur = edge.from_id;
+                while (up_visited.insert(cur).second) {
+                    auto it = superseding_map.find(cur);
+                    if (it == superseding_map.end()) break;
+                    cur = it->second;
+                    auto frec = store_.peek(cur);
+                    if (frec.ok() && frec->isAlive()) terminal_id = cur;
+                }
+            }
+            auto terminal_rec = store_.peek(terminal_id);
+            if (!terminal_rec.ok() || !terminal_rec->isAlive()) continue;
+            uint32_t terminal_ts = terminal_rec->created_at;
+
+            // Walk DOWN from the superseded node, collecting all transitively
+            // superseded Derived content and their Raw parents' content.
+            // peek() returns tombstoned records, so we can read old values.
+            std::queue<uint64_t> q;
+            q.push(edge.to_id);
+            while (!q.empty()) {
+                uint64_t cur = q.front();
+                q.pop();
+                if (!visited_global.insert(cur).second) continue;
+
+                auto cur_rec = store_.peek(cur);
+                if (!cur_rec.ok()) continue;
+
+                if (cur_rec->layer == MemoryLayer::Derived) {
+                    superseded_infos.push_back({cur_rec->content, terminal_ts});
+                    // Include Raw parent's content — catches historical values
+                    // from earlier turns (e.g. Raw parent of D(3万) mentions
+                    // "2万" which is also stale after D(4万) supersedes D(3万))
+                    if (cur_rec->parent_id != 0) {
+                        auto parent = store_.peek(cur_rec->parent_id);
+                        if (parent.ok()
+                            && visited_global.insert(cur_rec->parent_id).second) {
+                            superseded_infos.push_back({parent->content, terminal_ts});
+                        }
+                    }
+                }
+
+                // Follow outgoing Supersedes edges to older superseded facts
+                auto edges = graph_.getEdges(cur);
+                for (const auto& e : edges) {
+                    if (e.type == EdgeType::Supersedes
+                        && !visited_global.count(e.to_id)) {
+                        q.push(e.to_id);
+                    }
+                }
+            }
+        }
+        if (!superseded_infos.empty()) {
+            auto makeBigrams = [](const std::string& s) {
+                std::unordered_set<std::string> bg;
+                std::vector<std::string> chars;
+                for (size_t k = 0; k < s.size(); ) {
+                    unsigned char c = (unsigned char)s[k];
+                    size_t L = 1;
+                    if ((c & 0xE0) == 0xC0) L = 2;
+                    else if ((c & 0xF0) == 0xE0) L = 3;
+                    else if ((c & 0xF8) == 0xF0) L = 4;
+                    if (k + L > s.size()) break;
+                    chars.emplace_back(s.substr(k, L));
+                    k += L;
+                }
+                for (size_t k = 0; k + 1 < chars.size(); ++k) {
+                    bg.insert(chars[k] + chars[k + 1]);
+                }
+                return bg;
+            };
+            struct SupersededBg {
+                std::unordered_set<std::string> bigrams;
+                uint32_t superseding_ts;
+            };
+            std::vector<SupersededBg> superseded_bgs;
+            for (const auto& info : superseded_infos) {
+                auto bg = makeBigrams(info.content);
+                if (!bg.empty()) {
+                    superseded_bgs.push_back({std::move(bg), info.superseding_ts});
+                }
+            }
+            if (!superseded_bgs.empty()) {
+                candidates.erase(
+                    std::remove_if(candidates.begin(), candidates.end(),
+                        [&superseded_bgs, &makeBigrams](const ScoredMemory& sm) {
+                            auto bg_set = makeBigrams(sm.record.content);
+                            if (bg_set.empty()) return false;
+                            for (const auto& sbg : superseded_bgs) {
+                                // Only filter if candidate is OLDER than the
+                                // superseding fact (avoid filtering corrections)
+                                if (sm.record.created_at >= sbg.superseding_ts) continue;
+                                size_t hit = 0;
+                                for (const auto& bg : bg_set) {
+                                    if (sbg.bigrams.count(bg)) hit++;
+                                }
+                                // Use superseded bigrams as denominator: what %
+                                // of the old value's content appears in candidate?
+                                float overlap = (float)hit / (float)sbg.bigrams.size();
+                                if (overlap >= 0.35f) return true;
+                            }
+                            return false;
+                        }),
+                    candidates.end());
+            }
+        }
+    }
+
     auto ranked = rankAndFuse(candidates, top_k);
 
     // ── Post-ranking filter: remove superseded and conflict-losing memories ──
@@ -167,6 +337,21 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
         std::unordered_set<uint64_t> result_ids;
         for (const auto& sm : ranked) result_ids.insert(sm.record.memory_id);
 
+        // Debug: log all candidates before filtering
+        if (ranked.size() <= 20) {
+            for (size_t i = 0; i < ranked.size(); ++i) {
+                const auto& rec = ranked[i].record;
+                auto edges = graph_.getEdges(rec.memory_id);
+                size_t supersedes_count = 0;
+                for (const auto& e : edges) {
+                    if (e.type == EdgeType::Supersedes) supersedes_count++;
+                }
+                spdlog::debug("recall candidate[{}] id={} score={:.3f} supersedes_edges={} content={}",
+                             i, rec.memory_id, ranked[i].total_score, supersedes_count,
+                             rec.content.substr(0, 60));
+            }
+        }
+
         std::unordered_set<uint64_t> suppress;
 
         for (const auto& sm : ranked) {
@@ -174,6 +359,7 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
             for (const auto& edge : edges) {
                 // Supersedes edge: sm supersedes edge.to_id → suppress the old one
                 if (edge.type == EdgeType::Supersedes && result_ids.count(edge.to_id)) {
+                    spdlog::debug("suppressing {} (superseded by {})", edge.to_id, sm.record.memory_id);
                     suppress.insert(edge.to_id);
                 }
                 // ConflictsWith edge: keep the one with the newer created_at
@@ -257,8 +443,20 @@ Result<std::vector<ScoredMemory>> RetrievalPipeline::recall(
                     // — suppress the other (stale) record instead.
                     const auto& marker_rec = i_old ? ranked[i].record : ranked[j].record;
                     const auto& plain_rec  = i_old ? ranked[j].record : ranked[i].record;
+                    float marker_score = i_old ? ranked[i].total_score : ranked[j].total_score;
+                    float plain_score  = i_old ? ranked[j].total_score : ranked[i].total_score;
+
                     uint64_t suppress_id;
                     if (marker_rec.created_at >= plain_rec.created_at) {
+                        // Safety: if plain_rec has significantly higher score,
+                        // it's likely the correct answer and marker_rec is a
+                        // separate historical fact (not a state change).
+                        if (plain_score > marker_score + 0.1f) {
+                            spdlog::debug("RetrievalPipeline: skipping old-version suppression "
+                                         "(plain_score {:.3f} >> marker_score {:.3f})",
+                                         plain_score, marker_score);
+                            continue;
+                        }
                         suppress_id = plain_rec.memory_id;
                     } else {
                         suppress_id = marker_rec.memory_id;

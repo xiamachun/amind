@@ -27,7 +27,8 @@ ReconcileOp parseReconcileOp(const std::string& s);
 /// Result of asking the Reconciler about one candidate.
 struct ReconcileDecision {
     ReconcileOp op{ReconcileOp::ADD};
-    uint64_t    target_id{0};       ///< for REPLACE/RETRACT/REINFORCE/NOOP
+    uint64_t    target_id{0};       ///< for REPLACE/RETRACT/REINFORCE/NOOP (first target)
+    std::vector<uint64_t> target_ids; ///< all targets to act on (REPLACE/RETRACT)
     std::string rationale;          ///< LLM's stated reason; for audit + UI
     bool        from_fallback{false}; ///< true when LLM call failed and we defaulted to ADD
 };
@@ -45,7 +46,7 @@ public:
         /// enough to warrant LLM reconciliation. Below this we ADD blindly.
         float similarity_floor{0.70f};
         /// How many top neighbours to feed the LLM.
-        size_t max_neighbours{3};
+        size_t max_neighbours{15};
         /// Truncate neighbour content to this many chars in the prompt to
         /// keep token budget bounded.
         size_t max_content_chars{280};

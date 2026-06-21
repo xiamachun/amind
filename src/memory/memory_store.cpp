@@ -307,6 +307,7 @@ void MemoryStore::boostImportance(uint64_t memory_id, float delta) {
     std::unique_lock lock(mutex_);
     auto it = cache_.find(memory_id);
     if (it != cache_.end()) {
+        if (!it->second.isAlive()) return;
         it->second.importance = std::clamp(it->second.importance + delta, 0.0f, 1.0f);
         lsm_->putRaw(memory_id, it->second.serialize());
         return;
@@ -316,6 +317,7 @@ void MemoryStore::boostImportance(uint64_t memory_id, float delta) {
     if (!raw.has_value()) return;
     auto result = MemoryRecord::deserialize(raw.value());
     if (!result.ok()) return;
+    if (!result.value().isAlive()) return;
     result.value().importance = std::clamp(result.value().importance + delta, 0.0f, 1.0f);
     lsm_->putRaw(memory_id, result.value().serialize());
     cache_[memory_id] = std::move(result.value());

@@ -24,8 +24,27 @@ HttpConnectionPool::~HttpConnectionPool() {
 }
 
 int HttpConnectionPool::acquire(const std::string& host, int port) {
+    // Step 1: Wait for active connection slot (prevents overwhelming Ollama)
+    {
+        std::unique_lock<std::mutex> lock(active_mutex_);
+        if (active_count_.load() >= config_.maxActiveConnections) {
+            total_waited_.fetch_add(1);
+            auto timeout = std::chrono::milliseconds(config_.activeWaitTimeoutMs);
+            bool got_slot = active_cv_.wait_for(lock, timeout, [this] {
+                return active_count_.load() < config_.maxActiveConnections;
+            });
+            if (!got_slot) {
+                spdlog::warn("ConnectionPool: active slot timeout after {}ms, active={}/{}",
+                            config_.activeWaitTimeoutMs, active_count_.load(), config_.maxActiveConnections);
+                return -1;  // timeout, no slot available
+            }
+        }
+        active_count_.fetch_add(1);
+    }
+
     total_acquired_.fetch_add(1);
 
+    // Step 2: Try to reuse pooled connection
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto it = pool_.begin(); it != pool_.end(); ++it) {
@@ -33,16 +52,35 @@ int HttpConnectionPool::acquire(const std::string& host, int port) {
                 int fd = it->fd;
                 pool_.erase(it);
                 total_reused_.fetch_add(1);
-                spdlog::debug("ConnectionPool: reused fd={}", fd);
+                spdlog::debug("ConnectionPool: reused fd={} (active={})", fd, active_count_.load());
                 return fd;
             }
         }
     }
 
-    return createConnection(host, port);
+    // Step 3: Create new connection
+    int fd = createConnection(host, port);
+    if (fd < 0) {
+        // Connection failed, release the active slot
+        {
+            std::lock_guard<std::mutex> lock(active_mutex_);
+            active_count_.fetch_sub(1);
+        }
+        active_cv_.notify_one();
+        return -1;
+    }
+    spdlog::debug("ConnectionPool: new fd={} (active={})", fd, active_count_.load());
+    return fd;
 }
 
 void HttpConnectionPool::release(int fd, const std::string& host, int port) {
+    // Release active slot first (allows waiting threads to proceed)
+    {
+        std::lock_guard<std::mutex> lock(active_mutex_);
+        active_count_.fetch_sub(1);
+    }
+    active_cv_.notify_one();
+
     std::lock_guard<std::mutex> lock(mutex_);
     if (pool_.size() >= config_.maxConnections) {
         ::close(fd);
@@ -52,6 +90,13 @@ void HttpConnectionPool::release(int fd, const std::string& host, int port) {
 }
 
 void HttpConnectionPool::discard(int fd) {
+    // Release active slot first (allows waiting threads to proceed)
+    {
+        std::lock_guard<std::mutex> lock(active_mutex_);
+        active_count_.fetch_sub(1);
+    }
+    active_cv_.notify_one();
+
     ::close(fd);
 }
 

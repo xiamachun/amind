@@ -111,6 +111,10 @@ public:
     BackupManager& backupManager() { return *backup_mgr_; }
     HttpConnectionPool& connectionPool() { return *conn_pool_; }
 
+    /// Aggregate metrics across all agents.
+    size_t totalMemories();
+    size_t totalGraphEdges();
+
     // V2 subsystem accessors
     FeatureGate& featureGate() { return *feature_gate_; }
     WriteGate& writeGate() { return *write_gate_; }

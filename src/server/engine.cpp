@@ -40,6 +40,8 @@ Result<void, Error> Engine::init() {
     pool_config.idleTimeoutMs = static_cast<size_t>(config_.getInt("pool_idle_timeout_ms", 30000));
     pool_config.circuitBreakerThreshold = static_cast<size_t>(config_.getInt("pool_circuit_threshold", 5));
     pool_config.circuitBreakerCooldownMs = static_cast<size_t>(config_.getInt("pool_circuit_cooldown_ms", 10000));
+    pool_config.maxActiveConnections = static_cast<size_t>(config_.getInt("pool_max_active_connections", 8));
+    pool_config.activeWaitTimeoutMs = static_cast<size_t>(config_.getInt("pool_active_wait_timeout_ms", 5000));
     conn_pool_ = std::make_shared<HttpConnectionPool>(pool_config);
 
     // Create providers from config
@@ -327,7 +329,7 @@ Result<void, Error> Engine::init() {
         Reconciler::Config rc_cfg;
         rc_cfg.similarity_floor = config_.getFloat("v2_reconcile_similarity_floor", 0.70f);
         rc_cfg.max_neighbours   = static_cast<size_t>(
-            config_.getInt("v2_reconcile_max_neighbours", 3));
+            config_.getInt("v2_reconcile_max_neighbours", 15));
         reconciler_ = std::make_unique<Reconciler>(llm_, rc_cfg);
         spdlog::info("Reconciler enabled (sim_floor={}, max_neighbours={})",
                      rc_cfg.similarity_floor, rc_cfg.max_neighbours);
@@ -788,6 +790,8 @@ void Engine::registerVariables() {
 
     // Connection Pool (mixed)
     vm.registerVar("pool_max_connections",      T::INT, M::READONLY, "8",        "Max pooled connections", "pool");
+    vm.registerVar("pool_max_active_connections", T::INT, M::READONLY, "8",      "Max concurrent active requests per host:port", "pool");
+    vm.registerVar("pool_active_wait_timeout_ms", T::INT, M::DYNAMIC, "5000",    "Max wait for active connection slot (ms)", "pool");
     vm.registerVar("pool_idle_timeout_ms",      T::INT, M::DYNAMIC, "30000",     "Idle connection timeout (ms)", "pool");
     vm.registerVar("pool_circuit_threshold",    T::INT, M::DYNAMIC, "5",         "Circuit breaker failure threshold", "pool");
     vm.registerVar("pool_circuit_cooldown_ms",  T::INT, M::DYNAMIC, "10000",     "Circuit breaker cooldown (ms)", "pool");
@@ -1188,6 +1192,28 @@ RemoveResult Engine::removeMemoryIsolated(uint64_t memory_id, AgentStore& store,
     // Use per-agent LineageIndex for correct isolation
     RemoveCoordinator agent_coordinator(*store.lineage, *forget_engine_);
     return agent_coordinator.remove(memory_id, reason, get_record, persist, hnsw_delete);
+}
+
+size_t Engine::totalMemories() {
+    std::lock_guard lock(agent_stores_mutex_);
+    size_t total = 0;
+    for (const auto& [id, store] : agent_stores_) {
+        if (store && store->memory) {
+            total += store->memory->totalMemories();
+        }
+    }
+    return total;
+}
+
+size_t Engine::totalGraphEdges() {
+    std::lock_guard lock(agent_stores_mutex_);
+    size_t total = 0;
+    for (const auto& [id, store] : agent_stores_) {
+        if (store && store->graph) {
+            total += store->graph->edgeCount();
+        }
+    }
+    return total;
 }
 
 }  // namespace amind

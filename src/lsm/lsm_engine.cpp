@@ -384,7 +384,7 @@ void LSMEngine::flushThreadLoop() {
         }
 
         // Periodic flush
-        {
+        try {
             std::lock_guard dataLock(mutex_);
             if (!active_memtable_->empty()) {
                 spdlog::info("Lazy flush: flushing {} entries to SSTable",
@@ -395,6 +395,8 @@ void LSMEngine::flushThreadLoop() {
                     compactL0();
                 }
             }
+        } catch (const std::exception& e) {
+            spdlog::error("Lazy flush failed: {}", e.what());
         }
     }
 }

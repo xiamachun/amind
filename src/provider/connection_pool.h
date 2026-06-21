@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -9,12 +10,22 @@
 
 namespace amind {
 
-/// HTTP connection pool with keep-alive support, idle eviction, and circuit breaker.
-/// Reuses TCP connections to reduce connect/close overhead for Ollama API calls.
+/// HTTP connection pool with keep-alive support, idle eviction, circuit breaker,
+/// and active connection concurrency limiting.
+///
+/// The pool tracks two distinct concepts:
+///   - maxConnections:    max idle connections kept alive for reuse
+///   - maxActiveConnections: max simultaneous in-flight requests to the same
+///                          host:port. Beyond this, acquire() blocks (with
+///                          timeout) instead of creating more TCP connections.
+///                          This prevents overwhelming the upstream service
+///                          (e.g. Ollama) which serializes requests internally.
 class HttpConnectionPool {
 public:
     struct Config {
-        size_t maxConnections = 8;          // max pooled connections
+        size_t maxConnections = 8;          // max pooled idle connections
+        size_t maxActiveConnections = 8;    // max concurrent active requests
+        size_t activeWaitTimeoutMs = 5000;  // max wait for an active slot
         size_t idleTimeoutMs = 30000;       // idle connection timeout
         size_t circuitBreakerThreshold = 5; // consecutive failures to trip breaker
         size_t circuitBreakerCooldownMs = 10000; // cooldown before retry
@@ -57,6 +68,8 @@ public:
     size_t pooledCount() const;
     size_t totalAcquired() const { return total_acquired_.load(); }
     size_t totalReused() const { return total_reused_.load(); }
+    size_t activeCount() const { return active_count_.load(); }
+    size_t totalWaited() const { return total_waited_.load(); }
 
 private:
     struct PooledConnection {
@@ -73,6 +86,14 @@ private:
     std::vector<PooledConnection> pool_;
     mutable std::mutex mutex_;
 
+    // Active connection concurrency limiter.
+    // acquire() blocks here until a slot is available, preventing the upstream
+    // service (e.g. Ollama) from being overwhelmed by hundreds of simultaneous
+    // requests that serialize internally and cause extreme latency.
+    std::atomic<size_t> active_count_{0};
+    std::mutex active_mutex_;
+    std::condition_variable active_cv_;
+
     // Circuit breaker state
     std::atomic<size_t> consecutive_failures_{0};
     std::chrono::steady_clock::time_point circuit_opened_at_;
@@ -81,6 +102,7 @@ private:
     // Statistics
     std::atomic<size_t> total_acquired_{0};
     std::atomic<size_t> total_reused_{0};
+    std::atomic<size_t> total_waited_{0};
 };
 
 }  // namespace amind

@@ -59,4 +59,4 @@ bench/
 # ── Code style config (local preference) ────────────────────────────────────
 .clang-format
 .clang-tidy
-
+.switch_model.sh

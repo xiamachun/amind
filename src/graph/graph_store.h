@@ -49,6 +49,9 @@ public:
     /// Get all conflict edges.
     std::vector<GraphEdge> getConflicts() const;
 
+    /// Get all Supersedes edges (for recall filtering).
+    std::vector<GraphEdge> getSupersedes() const;
+
     /// BFS/DFS traversal up to depth.
     std::vector<uint64_t> traverse(uint64_t start_id, int max_depth = 2) const;
 

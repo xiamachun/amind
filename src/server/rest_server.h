@@ -43,7 +43,6 @@ private:
     std::string handleArchiveMemory(const std::string& id_str);
     std::string handleDeleteAgentMemories(const std::string& agent_id);
     std::string handleIntercept(const std::string& body);
-    std::string handleCoverage(const std::string& query);
     std::string handleConflicts();
     std::string handleSessionStart(const std::string& body);
     
